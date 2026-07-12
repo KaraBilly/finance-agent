@@ -22,6 +22,8 @@ class Config:
     deepseek_model: str
     # Web
     tavily_api_key: str
+    # External Data APIs
+    tushare_api_key: str
     # Paths
     data_dir: Path
     output_dir: Path
@@ -51,6 +53,8 @@ class Config:
             deepseek_model=os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
             # Web
             tavily_api_key=os.getenv("TAVILY_API_KEY", ""),
+            # External Data APIs
+            tushare_api_key=os.getenv("TUSHARE_API_KEY", ""),
             # Paths
             data_dir=data_dir,
             output_dir=output_dir,

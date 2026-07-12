@@ -5,16 +5,16 @@ without changing Agent code.
 
 Current providers:
   LLM:        DoubaoProvider, DeepSeekProvider
-  MarketData: AkshareMarketProvider
-  Financials: AkshareFinancialsProvider
-  Filings:    CninfoFilingsProvider
+  MarketData: LocalMarketProvider
+  Financials: LocalFinancialsProvider
+  Filings:    LocalFilingsProvider
   WebSearch:  TavilyWebProvider
   Storage:    SQLiteStorageProvider
 """
 from .llm_openai import OpenAICompatibleLLM, DoubaoProvider, DeepSeekProvider
-from .market_akshare import AkshareMarketProvider
-from .financials_akshare import AkshareFinancialsProvider
-from .filings_cninfo import CninfoFilingsProvider
+from .market_local import LocalMarketProvider
+from .financials_local import LocalFinancialsProvider
+from .filings_local import LocalFilingsProvider
 from .web_tavily import TavilyWebProvider
 from .storage_sqlite import SQLiteStorageProvider
 
@@ -24,9 +24,9 @@ __all__ = [
     "DoubaoProvider",
     "DeepSeekProvider",
     # Data Providers
-    "AkshareMarketProvider",
-    "AkshareFinancialsProvider",
-    "CninfoFilingsProvider",
+    "LocalMarketProvider",
+    "LocalFinancialsProvider",
+    "LocalFilingsProvider",
     "TavilyWebProvider",
     "SQLiteStorageProvider",
 ]

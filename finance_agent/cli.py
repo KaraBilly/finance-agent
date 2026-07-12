@@ -112,9 +112,9 @@ def init():
 @click.argument("symbols", nargs=-1)
 def bootstrap_indices(symbols):
     """Pre-download ~20y daily data for major A-share indices."""
-    from .providers import AkshareMarketProvider
+    from .providers import LocalMarketProvider
     from datetime import datetime
-    market = AkshareMarketProvider()
+    market = LocalMarketProvider()
     catalog = market.list_available_indices()
     syms = list(symbols) or list(catalog.keys())
     end = datetime.now().strftime("%Y%m%d")
@@ -124,6 +124,8 @@ def bootstrap_indices(symbols):
             df = market.get_index_daily(s, start=start, end=end)
             console.print(f"[green]{s}[/green] {catalog.get(s,'?')}: "
                           f"{len(df)} rows, {df['date'].min().date()}..{df['date'].max().date()}")
+        except FileNotFoundError as e:
+            console.print(f"[yellow]{s} NOT FOUND[/yellow]: {e}")
         except Exception as e:
             console.print(f"[red]{s} FAILED[/red]: {e}")
 

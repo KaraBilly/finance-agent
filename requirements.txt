@@ -1,12 +1,13 @@
 # --- LLM clients ---
-openai>=1.60.0                # OpenAI-compatible SDK for Ark, DeepSeek, Walmart Gateway
+openai>=1.60.0                # OpenAI-compatible SDK for Ark, DeepSeek
 
 # --- Data sources ---
-akshare>=1.16.0               # A-share market data + filings index (1.18.x supports py3.13)
+requests>=2.32.0              # HTTP client for external data APIs
 tavily-python>=0.5.0          # web search
 trafilatura>=1.12.0           # HTML main-text extraction
-requests>=2.32.0
+urllib3<2                      # LibreSSL compat (macOS system Py3.9)
 lxml>=5.3.0
+lxml_html_clean>=0.4.1      # lxml.html.clean is now separate
 
 # --- Retrieval / ranking ---
 rank-bm25==0.2.2

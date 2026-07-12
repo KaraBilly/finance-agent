@@ -3,7 +3,7 @@
 This is the ONLY place where Provider implementations are instantiated.
 Agent code imports Capabilities, not Providers.
 
-To swap a provider (e.g., akshare → tushare):
+To swap a provider (e.g., local files → external API):
   1. Create new provider implementing the Capability interface
   2. Change the registration here
   3. Agent code remains unchanged
@@ -78,16 +78,16 @@ def create_llm_provider(
 def _build_data_providers():
     """Common data providers shared by all profiles."""
     from .providers import (
-        AkshareMarketProvider,
-        AkshareFinancialsProvider,
-        CninfoFilingsProvider,
+        LocalMarketProvider,
+        LocalFinancialsProvider,
+        LocalFilingsProvider,
         TavilyWebProvider,
         SQLiteStorageProvider,
     )
     return {
-        "market_data": AkshareMarketProvider(),
-        "financials": AkshareFinancialsProvider(),
-        "filings": CninfoFilingsProvider(),
+        "market_data": LocalMarketProvider(),
+        "financials": LocalFinancialsProvider(),
+        "filings": LocalFilingsProvider(),
         "web_search": TavilyWebProvider(),
         "storage": SQLiteStorageProvider(),
     }

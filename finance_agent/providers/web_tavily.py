@@ -6,8 +6,6 @@ import re
 from pathlib import Path
 
 import requests
-import trafilatura
-from tavily import TavilyClient
 
 from ..capabilities.web_search import WebSearchCapability
 from ..capabilities.llm import LLMCapability
@@ -33,6 +31,7 @@ class TavilyWebProvider(WebSearchCapability):
 
     def search(self, query: str, *, max_results: int = 6) -> list[dict]:
         CONFIG.require("tavily_api_key")
+        from tavily import TavilyClient
         client = TavilyClient(api_key=CONFIG.tavily_api_key)
         resp = client.search(query=query, max_results=max_results,
                              search_depth="advanced", include_answer=False)
@@ -43,6 +42,7 @@ class TavilyWebProvider(WebSearchCapability):
         if cache.exists():
             return cache.read_text(encoding="utf-8", errors="ignore")
         try:
+            import trafilatura
             html = trafilatura.fetch_url(url, no_ssl=True)
             if not html:
                 html = requests.get(url, timeout=10,
