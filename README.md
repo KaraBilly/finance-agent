@@ -1,7 +1,7 @@
-# Finance Personal Agent — A股
+# Finance Personal Agent — 美股
 
-一个聚焦 **A 股** 的个人金融交易 Agent。回答问题时:
-- 优先使用**结构化数据源** (东财官方 JSON: 指数/行情/财务报表 + cninfo 巨潮官方 JSON: 公告年报, 均**无 token / 零爬虫中间层**)
+一个聚焦 **美股** 的个人金融交易 Agent。回答问题时:
+- 优先使用 **Finnhub 官方 API** 获取行情、财务报表和 SEC 公告, 均**无爬虫中间层**
 - 需要时再走 **Tavily 搜索 + Trafilatura 抽正文 + BM25 粗筛 + LLM rerank**
 - 使用 **两个模型协同**:
   - `doubao-seed-evolving` (火山方舟 Ark) — 规划、rerank、事实校验、偏好抽取
@@ -28,7 +28,7 @@ pip install -r requirements.txt
 
 ```bash
 cp .env.example .env
-# 编辑 .env,选择一种 LLM 后端:
+# 编辑 .env,填入 API keys:
 ```
 
 **必填 API key:**
@@ -38,19 +38,18 @@ cp .env.example .env
 | **Doubao (火山方舟)** | `ARK_API_KEY` | doubao-seed-evolving,负责 planner/verifier/memory |
 | **DeepSeek** | `DEEPSEEK_API_KEY` | deepseek-chat,负责 synthesizer |
 | **Tavily** | `TAVILY_API_KEY` | web 搜索 |
+| **Finnhub** | `FINNHUB_API_KEY` | 美股行情/财务/公告 |
 
-### 3. 初始化 + 拉 20 年 A 股指数
+### 3. 初始化
 
 ```bash
 python -m finance_agent init
-python -m finance_agent bootstrap-indices
-# ↑ 拉上证/深证/沪深300/中证500/创业板/上证50/中证1000 的日线到 data/indices/*.parquet
 ```
 
 ### 4. 提问
 
 ```bash
-python -m finance_agent ask "贵州茅台(600519)的主要风险因素有哪些?"
+python -m finance_agent ask "Apple(AAPL) 的主要风险因素有哪些?"
 ```
 
 答案会在终端渲染,并同时写到 `outputs/`:
@@ -65,7 +64,7 @@ python -m finance_agent ask "贵州茅台(600519)的主要风险因素有哪些?
 ## 架构一览
 
 ```
-question ─► [doubao] Planner ─► {market_cn, financials, filings, web} 工具
+question ─► [doubao] Planner ─► {market_us, financials_us, filings_us, web} 工具
                                      │
                                      ▼
                       Evidence Pool  (每条落 SQLite → [S1..Sn])
@@ -96,7 +95,10 @@ finance_agent/
 │   └── ...
 ├── providers/            # 具体实现层 (可替换)
 │   ├── llm_openai.py    # DoubaoProvider, DeepSeekProvider
-│   └──  # market_eastmoney, financials_eastmoney, filings_cninfo_api, web_tavily, storage_sqlite
+│   └── us/              # 美股 Provider (Finnhub)
+│       ├── market_finnhub.py
+│       ├── financials_finnhub.py
+│       └── filings_finnhub.py
 ├── agent/                # planner / synthesizer / verifier / memory / loop
 ├── retrieval/            # bm25 + llm rerank
 ├── storage/              # SQLite provenance
@@ -123,14 +125,6 @@ python -m finance_agent init
 
 **作用**: 创建 SQLite 数据库和 `data/` 目录结构。首次运行前必须执行。
 
-### `bootstrap-indices` — 拉取指数数据
-
-```bash
-python -m finance_agent bootstrap-indices
-```
-
-**作用**: 预下载主要 A 股指数(上证/深证/沪深300/中证500/创业板/上证50/中证1000) 近 20 年日线数据到 `data/indices/*.parquet`。
-
 ### `prefs` — 查看用户偏好
 
 ```bash
@@ -149,17 +143,15 @@ python -m finance_agent clear-prefs
 
 ## 文档接入和加载说明
 
-本项目支持**多市场** (A 股 / 美股) 和**多数据源** (官方 API / Web 搜索)。
+本项目支持**多市场** (美股 / A 股) 和**多数据源** (官方 API / Web 搜索)。
 
 ### 数据源接入方式
 
 | 类型 | 数据源 | 接入方式 | 说明 |
 |------|--------|---------|------|
-| **A 股行情** | 东方财富 | 官方 JSON API | 无 token,零爬虫中间层 |
-| **A 股财务** | 东方财富 | 官方 JSON API | 利润表/资产负债表/现金流量表 |
-| **A 股公告** | cninfo 巨潮 | 官方 JSON API | 公告标题+URL,PDF 直链 |
-| **美股行情** | Finnhub | REST API | 需 `FINNHUB_API_KEY` |
-| **美股财务** | Finnhub | REST API | 需 `FINNHUB_API_KEY` |
+| **美股行情** | Finnhub | REST API | 需 `FINNHUB_API_KEY`,免费 tier 60 次/分钟 |
+| **美股财务** | Finnhub | REST API | 利润表/资产负债表/现金流量表 (financials-reported) |
+| **美股公告** | Finnhub | REST API | SEC filings (10-K, 10-Q, 8-K 等) |
 | **Web 搜索** | Tavily | REST API | 需 `TAVILY_API_KEY` |
 
 ### 数据源加载流程
@@ -170,9 +162,9 @@ python -m finance_agent clear-prefs
     ▼
 [Planner] 分析意图 → 选择工具
     │
-    ├──► market_cn.index / market_us.index → 东财/Finnhub API → 指数/个股数据
-    ├──► financials / financials_us → 东财/Finnhub API → 财务报表
-    ├──► filings / filings_us → cninfo/Finnhub API → 公告年报
+    ├──► market_us → Finnhub API → 指数/个股行情数据
+    ├──► financials_us → Finnhub API → 财务报表 (income/balance/cashflow)
+    ├──► filings_us → Finnhub API → SEC filings (10-K/10-Q/8-K)
     └──► web → Tavily 搜索 → Trafilatura 抽正文 → BM25 粗筛 → LLM rerank
     │
     ▼
@@ -196,11 +188,11 @@ python -m finance_agent clear-prefs
 
 ### 切换市场
 
-通过环境变量切换 A 股/美股:
+通过环境变量切换美股/A 股:
 
 ```bash
-export FA_MARKET=cn   # 默认,A 股
-export FA_MARKET=us   # 美股
+export FA_MARKET=us   # 默认,美股
+export FA_MARKET=cn   # A 股 (需东财/cninfo API)
 ```
 
 或修改 `.env` 文件中的 `FA_MARKET`。
@@ -208,7 +200,7 @@ export FA_MARKET=us   # 美股
 ## 已知限制 & 后续改进
 
 见 [`doc/design.md`](./doc/design.md) 最后一节。要点:
-- filings 目前只用 cninfo 的标题+URL (`adjunctUrl` PDF 直链已拿到, 下一步才抽风险因子章节)
+- Finnhub free tier 限制 60 次/分钟,高频使用需考虑缓存
+- filings 目前只获取 SEC 公告标题+URL,未抽取 PDF 正文中的风险因子章节
 - Verifier 只查引用一致性,不判证据真伪
-- 东财 / cninfo JSON 字段偶变 → provider 降级为空 DataFrame, agent 会自动切 web fallback
 - 未做 embedding 向量检索,BM25+LLM rerank 对 demo 规模够用
