@@ -135,9 +135,3 @@ def create_us_registry() -> ProviderRegistry:
     """Create registry for US stock market."""
     return create_default_registry(market="us")
 
-def create_mock_registry() -> ProviderRegistry:
-    """Create registry with mock providers for testing without API keys.
-    
-    TODO: Implement mock providers for offline testing.
-    """
-    raise NotImplementedError("Mock registry not yet implemented")

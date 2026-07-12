@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "finance-agent"
+version = "0.1.0"
+description = "AI-powered financial analysis agent for A-share and US stocks"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "Billy", email = "your.email@example.com"}
+]
+keywords = ["finance", "stock", "a-share", "ai", "agent"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+    # --- LLM clients ---
+    "openai>=1.60.0",
+    # --- Data sources ---
+    "tavily-python>=0.5.0",
+    "trafilatura>=1.12.0",
+    "requests>=2.32.0",
+    "lxml>=5.3.0",
+    # --- Retrieval / ranking ---
+    "rank-bm25==0.2.2",
+    # --- Storage / data ---
+    "pandas>=2.2.0",
+    "pyarrow>=18.0.0",
+    "tabulate>=0.9.0",
+    # --- CLI / rendering ---
+    "rich==13.9.4",
+    "click==8.1.7",
+    "markdown==3.7",
+    "jinja2==3.1.4",
+    # --- Utils ---
+    "python-dotenv==1.0.1",
+    "tenacity==9.0.0",
+]
+
+[project.scripts]
+finance-agent = "finance_agent.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/KaraBilly/finance-agent"
+Repository = "https://github.com/KaraBilly/finance-agent"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["finance_agent*"]

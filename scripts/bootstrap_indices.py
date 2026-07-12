@@ -10,7 +10,7 @@ import sys
 from datetime import datetime
 
 from finance_agent.providers import EastmoneyMarketProvider
-from finance_agent.providers.market_eastmoney import INDEX_CATALOG
+from finance_agent.providers.cn.market_eastmoney import INDEX_CATALOG
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("bootstrap")
