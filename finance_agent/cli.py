@@ -2,6 +2,7 @@
 
 Subcommands:
   ask "..."             Run one turn and print answer.
+  chat                  Start interactive multi-turn chat session.
   prefs                 Show stored user preferences.
   clear-prefs           Wipe stored user preferences.
   init                  Initialise DB & data dirs.
@@ -66,6 +67,51 @@ def ask(question, quiet):
     if result.prefs_updated:
         console.print("[dim]memory updates:[/dim] "
                       + ", ".join(f"{p['topic']}={p['weight']:.2f}" for p in result.prefs_updated))
+
+    if result.conversation_id:
+        console.print(f"[dim]conversation: {result.conversation_id}[/dim]")
+
+
+@cli.command()
+@click.option("--conversation-id", help="Continue existing conversation")
+def chat(conversation_id):
+    """Start interactive multi-turn chat session."""
+    loop = AgentLoop()
+    current_conv_id = conversation_id
+    
+    console.print("[bold green]Finance Agent Chat[/bold green]")
+    console.print("[dim]Type 'exit' or 'quit' to end, 'new' to start fresh conversation[/dim]")
+    console.rule()
+    
+    while True:
+        try:
+            question = console.input("[bold cyan]You: [/bold cyan]")
+        except (EOFError, KeyboardInterrupt):
+            break
+        
+        question = question.strip()
+        if not question:
+            continue
+        if question.lower() in ("exit", "quit", "q"):
+            break
+        if question.lower() == "new":
+            current_conv_id = None
+            console.print("[dim]Starting new conversation...[/dim]")
+            continue
+        
+        console.rule(f"[bold magenta]Thinking...[/bold magenta]")
+        result = loop.ask(question, conversation_id=current_conv_id)
+        current_conv_id = result.conversation_id
+        
+        console.rule("[bold green]Answer")
+        console.print(Markdown(result.answer_md))
+        
+        if result.prefs_updated:
+            console.print("[dim]memory updates:[/dim] "
+                          + ", ".join(f"{p['topic']}={p['weight']:.2f}" for p in result.prefs_updated))
+        
+        console.print(f"[dim]conversation: {result.conversation_id}[/dim]")
+        console.rule()
 
 
 @cli.command()

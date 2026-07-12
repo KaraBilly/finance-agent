@@ -12,6 +12,10 @@ Architecture:
 Two-model orchestration:
   planner_llm     — planning, reranking, verification, memory extraction
   synthesizer_llm — final answer synthesis (with optional 1 repair pass)
+
+Multi-turn support:
+  conversation_id — optional, enables multi-turn dialogue with context
+  Uses PydanticAI-inspired RunContext pattern for dependency injection
 """
 from __future__ import annotations
 import logging
@@ -23,6 +27,7 @@ from typing import Any
 from ..capabilities.base import Evidence
 from ..registry import ProviderRegistry, create_default_registry
 from . import planner, synthesizer, verifier, memory
+from .conversation_manager import ConversationManager, ConversationContext
 
 log = logging.getLogger(__name__)
 
@@ -35,6 +40,39 @@ class AgentResult:
     trace: dict
     answer_id: int
     prefs_updated: list[dict] = field(default_factory=list)
+    conversation_id: str | None = None
+
+@dataclass
+class AgentContext:
+    """Context object inspired by PydanticAI's RunContext.
+    
+    Provides dependency injection for agent operations including:
+    - Conversation history management
+    - User preferences
+    - Tool registry access
+    """
+    registry: ProviderRegistry
+    conversation_manager: ConversationManager
+    conversation_id: str | None = None
+    max_history_turns: int = 10
+    
+    @property
+    def conversation_context(self) -> ConversationContext:
+        """Get or create conversation context."""
+        return ConversationContext(self.conversation_manager, self.conversation_id)
+    
+    def get_history(self) -> list[dict[str, str]]:
+        """Get conversation history for LLM context."""
+        conv_ctx = self.conversation_context
+        return conv_ctx.get_context_messages(max_turns=self.max_history_turns)
+    
+    def add_user_turn(self, content: str, metadata: dict[str, Any] | None = None):
+        """Record user turn in conversation."""
+        return self.conversation_context.add_user_turn(content, metadata)
+    
+    def add_assistant_turn(self, content: str, metadata: dict[str, Any] | None = None):
+        """Record assistant turn in conversation."""
+        return self.conversation_context.add_assistant_turn(content, metadata)
 
 class AgentLoop:
     """Finance Agent — depends only on Capability interfaces, not concrete providers.
@@ -43,6 +81,10 @@ class AgentLoop:
       1. Create new provider implementing the Capability interface
       2. Pass custom ProviderRegistry to __init__
       3. Agent code remains unchanged
+    
+    Multi-turn support:
+      - Pass conversation_id to ask() to continue an existing conversation
+      - Agent will load previous context and include it in planning/synthesis
     """
     
     def __init__(self, registry: ProviderRegistry | None = None):
@@ -60,6 +102,9 @@ class AgentLoop:
         self._filings = self.registry.filings
         self._web = self.registry.web_search
         self._storage = self.registry.storage
+        
+        # Initialize conversation manager for multi-turn support
+        self._conversation_manager = ConversationManager(self._storage)
 
     # ---------- tool dispatch ----------
     def _run_tools(self, tool_calls: list[dict]) -> list[Evidence]:
@@ -145,18 +190,34 @@ class AgentLoop:
         return evs
 
     # ---------- one turn ----------
-    def ask(self, question: str) -> AgentResult:
+    def ask(self, question: str, conversation_id: str | None = None) -> AgentResult:
         t0 = time.time()
         trace: dict[str, Any] = {
             "model_planner": self._planner_llm.name,
             "model_synthesizer": self._synth_llm.name,
         }
+        
+        # Create AgentContext for dependency injection pattern
+        agent_ctx = AgentContext(
+            registry=self.registry,
+            conversation_manager=self._conversation_manager,
+            conversation_id=conversation_id,
+            max_history_turns=10,
+        )
+        
+        # Add user turn to conversation history
+        agent_ctx.add_user_turn(question)
+        
+        # Get conversation history for context (PydanticAI-inspired)
+        history = agent_ctx.get_history()
+        trace["conversation_history_length"] = len(history)
+        trace["conversation_id"] = agent_ctx.conversation_context.conversation_id
 
         prefs = self._storage.load_prefs()
         trace["prefs_in"] = prefs
 
-        # 1. Plan (via Capability)
-        plan_obj = planner.plan(self._planner_llm, question, prefs)
+        # 1. Plan (via Capability) - with conversation context
+        plan_obj = planner.plan(self._planner_llm, question, prefs, history=history)
         trace["plan"] = plan_obj
 
         # 2. Tools (via Capabilities)
@@ -182,8 +243,8 @@ class AgentLoop:
         raw_sections = plan_obj.get("answer_sections") or ["Summary", "Key Numbers", "Risks", "Evidence"]
         sections: list[str] = [s for s in raw_sections if isinstance(s, str)]
 
-        # 3. Synthesize (via Capability)
-        draft = synthesizer.synthesize(self._synth_llm, question, prefs, evs, sections)
+        # 3. Synthesize (via Capability) - with conversation context
+        draft = synthesizer.synthesize(self._synth_llm, question, prefs, evs, sections, history=history)
         trace["draft_len"] = len(draft)
 
         # 4. Verify (via Capability) + up to 1 repair
@@ -217,6 +278,9 @@ class AgentLoop:
         # 6. Memory (via Capability)
         prefs_updated = memory.extract_and_update(self._planner_llm, self._storage, question, answer, answer_id=aid)
         trace["prefs_updated"] = prefs_updated
+        
+        # 7. Add assistant turn to conversation history
+        agent_ctx.add_assistant_turn(answer, metadata={"answer_id": aid, "evidence_count": len(evs)})
 
         return AgentResult(
             question=question,
@@ -226,6 +290,7 @@ class AgentLoop:
             trace=trace,
             answer_id=aid,
             prefs_updated=prefs_updated,
+            conversation_id=agent_ctx.conversation_context.conversation_id,
         )
 
 def _extract_used_labels(text: str) -> list[int]:

@@ -44,10 +44,19 @@ def _format_evidence(evs: list[Evidence]) -> str:
 def synthesize(model: LLMCapability, question: str, prefs: list[dict],
                evidences: list[Evidence], sections: list[str],
                *, prior_answer: str | None = None,
-               verifier_feedback: str | None = None) -> str:
+               verifier_feedback: str | None = None,
+               history: list[dict[str, str]] | None = None) -> str:
     prefs_str = ", ".join(f"{p['topic']}({p['weight']:.2f})" for p in prefs) or "(none)"
     ev_str = _format_evidence(evidences)
     sec_str = ", ".join(sections)
+
+    # Build messages with optional conversation history
+    messages = [ChatMessage("system", SYSTEM)]
+    
+    # Add conversation history if available
+    if history:
+        for msg in history:
+            messages.append(ChatMessage(msg["role"], msg["content"]))
 
     user_parts = [
         f"# Question\n{question}",
@@ -61,7 +70,6 @@ def synthesize(model: LLMCapability, question: str, prefs: list[dict],
             f"# Verifier feedback — fix these issues\n{verifier_feedback}"
         )
     user = "\n\n".join(user_parts)
-    return model.chat(
-        [ChatMessage("system", SYSTEM), ChatMessage("user", user)],
-        temperature=0.2,
-    )
+    messages.append(ChatMessage("user", user))
+    
+    return model.chat(messages, temperature=0.2)

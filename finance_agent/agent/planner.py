@@ -63,17 +63,26 @@ Rules:
 """
 
 
-def plan(model: LLMCapability, question: str, prefs: list[dict]) -> dict[str, Any]:
+def plan(model: LLMCapability, question: str, prefs: list[dict], 
+         history: list[dict[str, str]] | None = None) -> dict[str, Any]:
     # Select system prompt based on market configuration
     market = CONFIG.market
     system = SYSTEM_US if market == "us" else SYSTEM_CN
     
     prefs_str = "\n".join(f"- {p['topic']} (weight={p['weight']:.2f})" for p in prefs) or "(none)"
+    
+    # Build messages with optional conversation history
+    messages = [ChatMessage("system", system)]
+    
+    # Add conversation history if available
+    if history:
+        for msg in history:
+            messages.append(ChatMessage(msg["role"], msg["content"]))
+    
     user = f"User question:\n{question}\n\nUser preferences:\n{prefs_str}\n\nReturn ToolPlan JSON."
-    obj = model.chat_json(
-        [ChatMessage("system", system), ChatMessage("user", user)],
-        temperature=0.1,
-    )
+    messages.append(ChatMessage("user", user))
+    
+    obj = model.chat_json(messages, temperature=0.1)
     # minimal shape check
     obj.setdefault("tools", [])
     obj.setdefault("entities", {})
