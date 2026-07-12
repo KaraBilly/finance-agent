@@ -17,9 +17,9 @@ import time
 import pandas as pd
 import requests
 
-from ..capabilities.base import Evidence
-from ..capabilities.financials import FinancialsCapability, StatementType
-from ..config import CONFIG
+from ...capabilities.base import Evidence
+from ...capabilities.financials import FinancialsCapability, StatementType
+from ...config import CONFIG
 
 log = logging.getLogger(__name__)
 

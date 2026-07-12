@@ -3,24 +3,33 @@
 Each provider implements a Capability interface. Providers can be swapped
 without changing Agent code.
 
+Organization:
+  - providers/cn/ : China A-share market providers
+  - providers/us/ : US stock market providers
+  - providers/    : Common providers (LLM, WebSearch, Storage)
+
 Current providers:
   LLM:        DoubaoProvider, DeepSeekProvider
-  MarketData: EastmoneyMarketProvider     (direct eastmoney JSON API, token-free)
-                FinnhubMarketProvider     (US stocks via Finnhub API)
-  Financials: EastmoneyFinancialsProvider (direct eastmoney JSON API, token-free)
-                FinnhubFinancialsProvider (US financials via Finnhub API)
-  Filings:    CninfoApiFilingsProvider    (direct cninfo JSON API, token-free)
-                FinnhubFilingsProvider    (US SEC filings via Finnhub API)
+  MarketData: EastmoneyMarketProvider     (CN, direct eastmoney JSON API)
+                FinnhubMarketProvider     (US, via Finnhub API)
+  Financials: EastmoneyFinancialsProvider (CN, direct eastmoney JSON API)
+                FinnhubFinancialsProvider (US, via Finnhub API)
+  Filings:    CninfoApiFilingsProvider    (CN, direct cninfo JSON API)
+                FinnhubFilingsProvider    (US, SEC filings via Finnhub)
   WebSearch:  TavilyWebProvider
   Storage:    SQLiteStorageProvider
 """
 from .llm_openai import OpenAICompatibleLLM, DoubaoProvider, DeepSeekProvider
-from .market_eastmoney import EastmoneyMarketProvider
-from .market_finnhub import FinnhubMarketProvider
-from .financials_eastmoney import EastmoneyFinancialsProvider
-from .financials_finnhub import FinnhubFinancialsProvider
-from .filings_cninfo_api import CninfoApiFilingsProvider
-from .filings_finnhub import FinnhubFilingsProvider
+from .cn import (
+    EastmoneyMarketProvider,
+    EastmoneyFinancialsProvider,
+    CninfoApiFilingsProvider,
+)
+from .us import (
+    FinnhubMarketProvider,
+    FinnhubFinancialsProvider,
+    FinnhubFilingsProvider,
+)
 from .web_tavily import TavilyWebProvider
 from .storage_sqlite import SQLiteStorageProvider
 

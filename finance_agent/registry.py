@@ -82,13 +82,17 @@ def _build_data_providers(market: str = "cn"):
     Args:
         market: "cn" or "us"
     """
-    from .providers import (
+    from .providers.cn import (
         EastmoneyMarketProvider,
         EastmoneyFinancialsProvider,
         CninfoApiFilingsProvider,
+    )
+    from .providers.us import (
         FinnhubMarketProvider,
         FinnhubFinancialsProvider,
         FinnhubFilingsProvider,
+    )
+    from .providers import (
         TavilyWebProvider,
         SQLiteStorageProvider,
     )

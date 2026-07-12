@@ -18,9 +18,9 @@ from typing import Iterable
 import pandas as pd
 import requests
 
-from ..capabilities.base import Evidence
-from ..capabilities.market_data import MarketDataCapability
-from ..config import CONFIG
+from ...capabilities.base import Evidence
+from ...capabilities.market_data import MarketDataCapability
+from ...config import CONFIG
 
 log = logging.getLogger(__name__)
 

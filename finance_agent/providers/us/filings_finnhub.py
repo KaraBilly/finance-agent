@@ -17,9 +17,9 @@ from typing import Any
 import pandas as pd
 import requests
 
-from ..capabilities.base import Evidence
-from ..capabilities.filings import FilingsCapability
-from ..config import CONFIG
+from ...capabilities.base import Evidence
+from ...capabilities.filings import FilingsCapability
+from ...config import CONFIG
 
 log = logging.getLogger(__name__)
 
