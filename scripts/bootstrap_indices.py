@@ -9,15 +9,14 @@ import logging
 import sys
 from datetime import datetime
 
-from finance_agent.providers import AkshareMarketProvider
-from finance_agent.providers.market_akshare import INDEX_CATALOG
+from finance_agent.providers import EastmoneyMarketProvider
+from finance_agent.providers.market_eastmoney import INDEX_CATALOG
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("bootstrap")
 
-
 def main(argv: list[str]) -> int:
-    market = AkshareMarketProvider()
+    market = EastmoneyMarketProvider()
     symbols = argv[1:] or list(INDEX_CATALOG.keys())
     end = datetime.now().strftime("%Y%m%d")
     start = str(int(end[:4]) - 20) + end[4:]  # ~20 years ago
@@ -31,7 +30,6 @@ def main(argv: list[str]) -> int:
         except Exception as e:
             log.error("  %s FAILED: %s", s, e)
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv))

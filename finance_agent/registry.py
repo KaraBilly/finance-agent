@@ -3,7 +3,7 @@
 This is the ONLY place where Provider implementations are instantiated.
 Agent code imports Capabilities, not Providers.
 
-To swap a provider (e.g., akshare → tushare):
+To swap a provider (e.g., eastmoney → an internal proprietary feed):
   1. Create new provider implementing the Capability interface
   2. Change the registration here
   3. Agent code remains unchanged
@@ -28,7 +28,6 @@ if TYPE_CHECKING:
 
 LLMBackend = Literal["doubao", "deepseek"]
 
-
 @dataclass
 class ProviderRegistry:
     """Container for all capability providers used by the agent."""
@@ -45,7 +44,6 @@ class ProviderRegistry:
     
     # Storage
     storage: "StorageCapability"
-
 
 def create_llm_provider(
     backend: LLMBackend,
@@ -74,24 +72,22 @@ def create_llm_provider(
     else:
         raise ValueError(f"Unknown LLM backend: {backend}")
 
-
 def _build_data_providers():
     """Common data providers shared by all profiles."""
     from .providers import (
-        AkshareMarketProvider,
-        AkshareFinancialsProvider,
-        CninfoFilingsProvider,
+        EastmoneyMarketProvider,
+        EastmoneyFinancialsProvider,
+        CninfoApiFilingsProvider,
         TavilyWebProvider,
         SQLiteStorageProvider,
     )
     return {
-        "market_data": AkshareMarketProvider(),
-        "financials": AkshareFinancialsProvider(),
-        "filings": CninfoFilingsProvider(),
+        "market_data": EastmoneyMarketProvider(),
+        "financials": EastmoneyFinancialsProvider(),
+        "filings": CninfoApiFilingsProvider(),
         "web_search": TavilyWebProvider(),
         "storage": SQLiteStorageProvider(),
     }
-
 
 def create_default_registry() -> ProviderRegistry:
     """Create the default registry: Doubao (planner) + DeepSeek (synthesizer)."""
@@ -101,7 +97,6 @@ def create_default_registry() -> ProviderRegistry:
         synthesizer_llm=DeepSeekProvider(),
         **_build_data_providers(),
     )
-
 
 def create_mock_registry() -> ProviderRegistry:
     """Create registry with mock providers for testing without API keys.

@@ -7,7 +7,7 @@ Architecture:
        │
   Provider Layer (concrete implementations, swappable)
        │
-  External APIs (akshare, Tavily, Ark, DeepSeek, etc.)
+  External APIs (eastmoney, cninfo, Tavily, Ark, DeepSeek, etc.)
 
 Two-model orchestration:
   planner_llm     — planning, reranking, verification, memory extraction
@@ -26,7 +26,6 @@ from . import planner, synthesizer, verifier, memory
 
 log = logging.getLogger(__name__)
 
-
 @dataclass
 class AgentResult:
     question: str
@@ -37,11 +36,10 @@ class AgentResult:
     answer_id: int
     prefs_updated: list[dict] = field(default_factory=list)
 
-
 class AgentLoop:
     """Finance Agent — depends only on Capability interfaces, not concrete providers.
     
-    To swap providers (e.g., akshare → tushare, Tavily → DuckDuckGo):
+    To swap providers (e.g., eastmoney → an internal proprietary feed, Tavily → DuckDuckGo):
       1. Create new provider implementing the Capability interface
       2. Pass custom ProviderRegistry to __init__
       3. Agent code remains unchanged
@@ -197,7 +195,6 @@ class AgentLoop:
             answer_id=aid,
             prefs_updated=prefs_updated,
         )
-
 
 def _extract_used_labels(text: str) -> list[int]:
     return [int(m.group(1)) for m in re.finditer(r"\[S(\d+)\]", text)]

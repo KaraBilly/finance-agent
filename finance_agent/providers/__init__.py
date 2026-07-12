@@ -5,16 +5,16 @@ without changing Agent code.
 
 Current providers:
   LLM:        DoubaoProvider, DeepSeekProvider
-  MarketData: AkshareMarketProvider
-  Financials: AkshareFinancialsProvider
-  Filings:    CninfoFilingsProvider
+  MarketData: EastmoneyMarketProvider     (direct eastmoney JSON API, token-free)
+  Financials: EastmoneyFinancialsProvider (direct eastmoney JSON API, token-free)
+  Filings:    CninfoApiFilingsProvider    (direct cninfo JSON API, token-free)
   WebSearch:  TavilyWebProvider
   Storage:    SQLiteStorageProvider
 """
 from .llm_openai import OpenAICompatibleLLM, DoubaoProvider, DeepSeekProvider
-from .market_akshare import AkshareMarketProvider
-from .financials_akshare import AkshareFinancialsProvider
-from .filings_cninfo import CninfoFilingsProvider
+from .market_eastmoney import EastmoneyMarketProvider
+from .financials_eastmoney import EastmoneyFinancialsProvider
+from .filings_cninfo_api import CninfoApiFilingsProvider
 from .web_tavily import TavilyWebProvider
 from .storage_sqlite import SQLiteStorageProvider
 
@@ -24,9 +24,9 @@ __all__ = [
     "DoubaoProvider",
     "DeepSeekProvider",
     # Data Providers
-    "AkshareMarketProvider",
-    "AkshareFinancialsProvider",
-    "CninfoFilingsProvider",
+    "EastmoneyMarketProvider",
+    "EastmoneyFinancialsProvider",
+    "CninfoApiFilingsProvider",
     "TavilyWebProvider",
     "SQLiteStorageProvider",
 ]

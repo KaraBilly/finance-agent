@@ -2,7 +2,10 @@
 openai>=1.60.0                # OpenAI-compatible SDK for Ark, DeepSeek, Walmart Gateway
 
 # --- Data sources ---
-akshare>=1.16.0               # A-share market data + filings index (1.18.x supports py3.13)
+# NOTE: A-share data is now fetched directly from the public JSON endpoints
+# that the eastmoney and cninfo websites use for their own front-ends —
+# no third-party scraper (akshare / tushare) and no API token required.
+# See DATA_SOURCES.md.
 tavily-python>=0.5.0          # web search
 trafilatura>=1.12.0           # HTML main-text extraction
 requests>=2.32.0
@@ -14,6 +17,7 @@ rank-bm25==0.2.2
 # --- Storage / data ---
 pandas>=2.2.0
 pyarrow>=18.0.0               # parquet for indices cache (py3.13 needs >=18)
+tabulate>=0.9.0               # required by pandas.DataFrame.to_markdown()
 
 # --- CLI / rendering ---
 rich==13.9.4

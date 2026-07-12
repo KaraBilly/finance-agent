@@ -1,7 +1,7 @@
 # Finance Personal Agent — A股
 
 一个聚焦 **A 股** 的个人金融交易 Agent。回答问题时:
-- 优先使用**结构化数据源** (akshare 指数/行情/财务、cninfo 公告)
+- 优先使用**结构化数据源** (东财官方 JSON: 指数/行情/财务报表 + cninfo 巨潮官方 JSON: 公告年报, 均**无 token / 零爬虫中间层**)
 - 需要时再走 **Tavily 搜索 + Trafilatura 抽正文 + BM25 粗筛 + LLM rerank**
 - 使用 **两个模型协同**:
   - `doubao-seed-evolving` (火山方舟 Ark) — 规划、rerank、事实校验、偏好抽取
@@ -92,7 +92,7 @@ finance_agent/
 │   └── ...
 ├── providers/            # 具体实现层 (可替换)
 │   ├── llm_openai.py    # DoubaoProvider, DeepSeekProvider
-│   └── ...  # market_akshare, financials_akshare, filings_cninfo, web_tavily, storage_sqlite
+│   └──  # market_eastmoney, financials_eastmoney, filings_cninfo_api, web_tavily, storage_sqlite
 ├── agent/                # planner / synthesizer / verifier / memory / loop
 ├── retrieval/            # bm25 + llm rerank
 ├── storage/              # SQLite provenance
@@ -112,7 +112,7 @@ python -m finance_agent bootstrap-indices  # 拉 20 年指数
 ## 已知限制 & 后续改进
 
 见 [`DESIGN.md`](./DESIGN.md) 最后一节。要点:
-- filings 目前只用 cninfo 的标题+URL(不下载 PDF 原文抽风险因子章节)
+- filings 目前只用 cninfo 的标题+URL (`adjunctUrl` PDF 直链已拿到, 下一步才抽风险因子章节)
 - Verifier 只查引用一致性,不判证据真伪
-- akshare 若访问受限或格式变动会降级到 web fallback
+- 东财 / cninfo JSON 字段偶变 → provider 降级为空 DataFrame, agent 会自动切 web fallback
 - 未做 embedding 向量检索,BM25+LLM rerank 对 demo 规模够用
