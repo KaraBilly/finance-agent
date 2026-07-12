@@ -28,6 +28,14 @@
                           │
                           ▼
 ┌─────────────────────────────────────────────────────────────┐
+│  Multi-turn Conversation (finance_agent/agent/conversation*)│ │
+│  - Conversation state persistence                           │
+│  - Turn-by-turn history tracking                            │
+│  - PydanticAI-inspired RunContext dependency injection        │
+└─────────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────────┐
 │  Render Layer (finance_agent/render/)                       │
 │  - Markdown output                                            │
 │  - HTML output                                                │
@@ -72,7 +80,42 @@ Agent Loop (只依赖 Capability 接口)
 - **替换 Provider 不需要改 Agent 代码** — 例如把 eastmoney 换成 JQData, 只需新建 `JQDataMarketProvider` 并在 `registry.py` 里注册
 - **便于测试** — 可以注入 Mock Provider 做单元测试, 不需要真实 API Key
 
-### 2.3 证据溯源 (Provenance)
+### 2.3 多轮对话架构 (PydanticAI 风格)
+
+我们引入了 **PydanticAI 风格的依赖注入模式**来实现多轮对话:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  AgentContext (PydanticAI-inspired)                          │
+│  ┌───────────────────────────────────────────────────────┐ │
+│  │  registry: ProviderRegistry                             │ │
+│  │  conversation_manager: ConversationManager               │ │
+│  │  conversation_id: str | None                           │ │
+│  │  max_history_turns: int = 10                           │ │
+│  └───────────────────────────────────────────────────────┘ │
+│                          │                                   │
+│                          ▼                                   │
+│  ┌───────────────────────────────────────────────────────┐ │
+│  │  ConversationContext                                    │ │
+│  │  ├─ get_history() → list[dict]                       │ │
+│  │  ├─ add_user_turn()                                    │ │
+│  │  └─ add_assistant_turn()                               │ │
+│  └───────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**核心组件**:
+- **`ConversationManager`**: 对话生命周期管理 (创建/读取/更新/删除)
+- **`ConversationContext`**: 对话上下文封装 (历史记录、轮次管理)
+- **`AgentContext`**: PydanticAI 风格的依赖注入容器
+
+**为什么用这种模式**:
+- **解耦**: Agent 不直接操作数据库,通过 Context 获取对话状态
+- **可测试**: 可以轻松 Mock Context 进行单元测试
+- **可扩展**: 未来可以接入 PydanticAI 的 `RunContext` 获得更强大的功能
+- **向后兼容**: 单轮对话 (`ask`) 和多轮对话 (`chat`) 共享同一套核心逻辑
+
+### 2.4 证据溯源 (Provenance)
 
 SQLite 中四张表把"答案 → 证据"这条链完整存下来:
 
@@ -81,6 +124,8 @@ SQLite 中四张表把"答案 → 证据"这条链完整存下来:
 - `answers` — 一次问答 (question / answer_md / trace_json)
 - `citations` — 把 answer 里的 `[S1]..[S#]` 映射到具体 `chunk_id`
 - `user_prefs` — 长期偏好
+- `conversations` — 多轮对话会话 (新增)
+- `conversation_turns` — 对话轮次记录 (新增)
 
 **为什么这么设计**: 任何 reviewer 拿到答案里的 `[S3]`, 都能顺 `citations → chunks → sources` 反查到"哪个 URL 的哪一段, 什么时候抓的, 本地快照在哪"。这不仅是"引用透明度", 也是**唯一能可靠调试 hallucination 的方式**。每次 answer 还会把整个 trace (planner 决策 / 工具调用 / verifier 结果) 写进 `trace_json`。
 
@@ -209,7 +254,10 @@ def create_default_registry(market="cn"):
 2. **并行工具调用** — 目前 Planner 输出多工具后是顺序跑, 用 `asyncio.gather` 或线程池能把延迟砍一半。
 3. **Embedding + FAISS 二级检索** — 当 web pipeline 抓到几百 chunks 时, BM25 会显得粗。加个中文 embedding (bge-small-zh) 做 rerank 前置。
 4. **量化指标计算工具** — 现在指数是给"起止收盘/累计涨跌"这类粗指标, 应该做 max drawdown / rolling sharpe / turnover 之类的计算工具让 LLM 调用。
-5. **多轮对话上下文** — 目前每个 `ask` 是独立的; 应该把 last-N answers 的摘要放进 planner, 让"上面结论的证据来源是什么"这类追问真正 work (当前只能靠 memory 里的偏好间接影响)。
+5. **PydanticAI 深度集成** — 当前已实现 PydanticAI 风格的依赖注入模式, 但尚未使用 PydanticAI 的 `Agent` 类和 `RunContext`。未来可以:
+   - 用 `Agent` 类封装工具调用, 获得自动重试、流式输出、结构化输出验证
+   - 用 `RunContext` 替代手动的 `AgentContext`, 获得更强大的依赖注入和类型安全
+   - 接入 PydanticAI 的 `MemoryTool` 和 `WebSearch` 内置能力
 6. **交叉验证多个数据源** — 财务数据从东财 + Sina/cninfo XBRL 拉两份对比, 不一致时警告。这是 real-money 应用必备。
 7. **PPT 输出 + 可视化图表** — python-pptx + matplotlib 生成分析报告 deck。功能层面收益中等,但演示价值高。
 
@@ -222,5 +270,6 @@ def create_default_registry(market="cn"):
 - **可验证**: Verifier + repair loop → hallucination 出现时**答案自带警告**, 不静默失败。
 - **多模型协同**: doubao + deepseek 有明确分工, 不是两个模型都做同一件事。
 - **用户偏好**: `user_prefs` 表 + EMA + planner 注入 = 完整闭环, 不是把对话历史整段塞进 prompt 那种伪长期记忆。
+- **多轮对话**: PydanticAI 风格的依赖注入 + ConversationManager 实现真正的上下文感知, 不是简单的历史拼接。
 
 功能数量刻意收敛在 4 个工具, 每个都能讲清楚"为什么在,为什么不做得更深"。

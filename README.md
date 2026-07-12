@@ -1,6 +1,6 @@
 # Finance Personal Agent — 美股
 
-一个聚焦 **美股** 的个人金融交易 Agent。回答问题时:
+一个聚焦 **美股** 的个人金融交易 Agent, 支持**多轮对话**。回答问题时:
 - 优先使用 **Finnhub 官方 API** 获取行情、财务报表和 SEC 公告, 均**无爬虫中间层**
 - 需要时再走 **Tavily 搜索 + Trafilatura 抽正文 + BM25 粗筛 + LLM rerank**
 - 使用 **两个模型协同**:
@@ -8,6 +8,7 @@
   - `deepseek` — 最终答案合成 (强制引用 `[S#]`)
 - **完整 provenance**: 每条证据都落 SQLite,可以从答案里的 `[S3]` 反查到 URL + 快照文件 + 抓取时间
 - **长期用户偏好**: 用户强调过的关注点(如 liquidity_risk / debt_maturity / cash_flow) 会持久化并影响后续 planning 与 answer 结构
+- **多轮对话**: 支持上下文感知的连续对话,自动维护对话历史
 
 设计详解 → [`docs/design.md`](./docs/design.md)
 
@@ -17,11 +18,13 @@
 
 ### 1. 环境
 
+**要求 Python >= 3.10** (PydanticAI 需要)
+
 ```bash
 git clone <this-repo> finance-agent
 cd finance-agent
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+python3.10 -m venv .venv && source .venv/bin/activate
+pip install -e .
 ```
 
 ### 2. 配置密钥
@@ -46,11 +49,26 @@ cp .env.example .env
 python -m finance_agent init
 ```
 
-### 4. 提问
+### 4. 提问 (单轮)
 
 ```bash
 python -m finance_agent ask "Apple(AAPL) 的主要风险因素有哪些?"
 ```
+
+### 5. 多轮对话
+
+```bash
+# 启动交互式对话
+python -m finance_agent chat
+
+# 继续已有对话
+python -m finance_agent chat --conversation-id <id>
+```
+
+在 `chat` 模式中:
+- 输入 `new` 开始新对话
+- 输入 `exit` 或 `quit` 退出
+- 对话历史自动持久化到 SQLite
 
 答案会在终端渲染,并同时写到 `outputs/`:
 - `<ts>-ans<id>.md` — Markdown
@@ -79,6 +97,9 @@ question ─► [doubao] Planner ─► {market_us, financials_us, filings_us, w
                       [doubao] Memory Extractor ── 更新 user_prefs
                                      │
                                      ▼
+                      Multi-turn Conversation ── 对话历史持久化
+                                     │
+                                     ▼
                       Render: Markdown / HTML / sources.json
 ```
 
@@ -99,7 +120,10 @@ finance_agent/
 │       ├── market_finnhub.py
 │       ├── financials_finnhub.py
 │       └── filings_finnhub.py
-├── agent/                # planner / synthesizer / verifier / memory / loop
+├── agent/                # planner / synthesizer / verifier / memory / loop / conversation
+│   ├── conversation.py           # 对话数据模型
+│   ├── conversation_manager.py   # 对话管理器 (PydanticAI 风格)
+│   └── pydantic_agent.py         # PydanticAI 原生 Agent 实现
 ├── retrieval/            # bm25 + llm rerank
 ├── storage/              # SQLite provenance
 └── render/               # md + html + sources.json 输出
@@ -107,7 +131,30 @@ finance_agent/
 
 ## CLI 参考
 
-### `ask` — 提问
+### `chat` — 多轮对话
+
+```bash
+python -m finance_agent chat                    # 启动交互式对话
+python -m finance_agent chat --conversation-id   # 继续已有对话
+```
+
+**作用**: 启动交互式多轮对话模式,自动维护对话上下文。支持:
+- 连续追问 (如"上面的数据来源是什么?")
+- 对话历史自动持久化到 SQLite
+- 随时输入 `new` 开始新对话
+- 输入 `exit` 或 `quit` 退出
+
+**示例**:
+```
+You: AAPL 的股价是多少?
+Agent: AAPL 当前股价为 $150.23... [S1]
+
+You: 那它的市盈率呢?
+Agent: 基于刚才的数据,AAPL 的市盈率为 28.5x... [S2]
+(Agent 自动理解"刚才的数据"指代前一轮的 AAPL)
+```
+
+### `ask` — 单轮提问
 
 ```bash
 python -m finance_agent ask "..."          # 问一个问题
@@ -199,8 +246,9 @@ export FA_MARKET=cn   # A 股 (需东财/cninfo API)
 
 ## 已知限制 & 后续改进
 
-见 [`doc/design.md`](./doc/design.md) 最后一节。要点:
+见 [`docs/design.md`](./docs/design.md) 最后一节。要点:
 - Finnhub free tier 限制 60 次/分钟,高频使用需考虑缓存
 - filings 目前只获取 SEC 公告标题+URL,未抽取 PDF 正文中的风险因子章节
 - Verifier 只查引用一致性,不判证据真伪
+- 多轮对话已实现 PydanticAI 风格依赖注入,但尚未使用 PydanticAI 的 `Agent` 类和 `RunContext` 获得自动重试、流式输出等高级功能
 - 未做 embedding 向量检索,BM25+LLM rerank 对 demo 规模够用
