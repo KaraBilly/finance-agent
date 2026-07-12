@@ -11,6 +11,10 @@ To swap a provider (e.g., eastmoney → an internal proprietary feed):
 Supported LLM backends:
   - "doubao"   : Volcengine Ark (doubao-seed-evolving)
   - "deepseek" : DeepSeek API
+
+Supported markets:
+  - "cn" : China A-share (default)
+  - "us" : US stocks
 """
 from __future__ import annotations
 from dataclasses import dataclass
@@ -72,31 +76,60 @@ def create_llm_provider(
     else:
         raise ValueError(f"Unknown LLM backend: {backend}")
 
-def _build_data_providers():
-    """Common data providers shared by all profiles."""
+def _build_data_providers(market: str = "cn"):
+    """Build data providers based on market.
+    
+    Args:
+        market: "cn" or "us"
+    """
     from .providers import (
         EastmoneyMarketProvider,
         EastmoneyFinancialsProvider,
         CninfoApiFilingsProvider,
+        FinnhubMarketProvider,
+        FinnhubFinancialsProvider,
+        FinnhubFilingsProvider,
         TavilyWebProvider,
         SQLiteStorageProvider,
     )
-    return {
-        "market_data": EastmoneyMarketProvider(),
-        "financials": EastmoneyFinancialsProvider(),
-        "filings": CninfoApiFilingsProvider(),
-        "web_search": TavilyWebProvider(),
-        "storage": SQLiteStorageProvider(),
-    }
+    
+    if market == "us":
+        return {
+            "market_data": FinnhubMarketProvider(),
+            "financials": FinnhubFinancialsProvider(),
+            "filings": FinnhubFilingsProvider(),
+            "web_search": TavilyWebProvider(),
+            "storage": SQLiteStorageProvider(),
+        }
+    else:  # default to CN
+        return {
+            "market_data": EastmoneyMarketProvider(),
+            "financials": EastmoneyFinancialsProvider(),
+            "filings": CninfoApiFilingsProvider(),
+            "web_search": TavilyWebProvider(),
+            "storage": SQLiteStorageProvider(),
+        }
 
-def create_default_registry() -> ProviderRegistry:
-    """Create the default registry: Doubao (planner) + DeepSeek (synthesizer)."""
+def create_default_registry(market: str = "cn") -> ProviderRegistry:
+    """Create the default registry: Doubao (planner) + DeepSeek (synthesizer).
+    
+    Args:
+        market: "cn" or "us"
+    """
     from .providers import DoubaoProvider, DeepSeekProvider
     return ProviderRegistry(
         planner_llm=DoubaoProvider(),
         synthesizer_llm=DeepSeekProvider(),
-        **_build_data_providers(),
+        **_build_data_providers(market=market),
     )
+
+def create_cn_registry() -> ProviderRegistry:
+    """Create registry for China A-share market."""
+    return create_default_registry(market="cn")
+
+def create_us_registry() -> ProviderRegistry:
+    """Create registry for US stock market."""
+    return create_default_registry(market="us")
 
 def create_mock_registry() -> ProviderRegistry:
     """Create registry with mock providers for testing without API keys.
