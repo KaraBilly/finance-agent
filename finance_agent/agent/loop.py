@@ -88,8 +88,7 @@ class AgentLoop:
     """
     
     def __init__(self, registry: ProviderRegistry | None = None):
-        from ..config import CONFIG
-        self.registry = registry or create_default_registry(market=CONFIG.market)
+        self.registry = registry or create_default_registry()
         
         # Initialize storage
         self.registry.storage.init()
@@ -116,7 +115,7 @@ class AgentLoop:
             name = t.get("tool") or t.get("name") or ""
             args = t.get("args") or t.get("arguments") or {}
             try:
-                if name == "market_cn.index":
+                if name == "market.index":
                     symbols = args.get("symbols") or list(self._market.list_available_indices().keys())[:3]
                     years = int(args.get("years", 20))
                     for sym in symbols:
@@ -126,23 +125,7 @@ class AgentLoop:
                         except Exception as e:
                             log.warning("summarize_index(%s) failed: %s", sym, e)
                             
-                elif name == "market_cn.stock":
-                    sym = str(args.get("symbol", "")).strip()
-                    if sym:
-                        ev = self._market.summarize_stock(sym, lookback_days=int(args.get("lookback_days", 365)))
-                        evs.append(self._storage.register_evidence(ev))
-                        
-                elif name == "market_us.index":
-                    symbols = args.get("symbols") or list(self._market.list_available_indices().keys())[:3]
-                    years = int(args.get("years", 20))
-                    for sym in symbols:
-                        try:
-                            ev = self._market.summarize_index(sym, lookback_years=years)
-                            evs.append(self._storage.register_evidence(ev))
-                        except Exception as e:
-                            log.warning("summarize_index(%s) failed: %s", sym, e)
-                            
-                elif name == "market_us.stock":
+                elif name == "market.stock":
                     sym = str(args.get("symbol", "")).strip()
                     if sym:
                         ev = self._market.summarize_stock(sym, lookback_days=int(args.get("lookback_days", 365)))
@@ -156,21 +139,7 @@ class AgentLoop:
                                                                periods=int(args.get("periods", 3))):
                             evs.append(self._storage.register_evidence(ev))
                             
-                elif name == "financials_us":
-                    sym = str(args.get("symbol", "")).strip()
-                    kinds = args.get("kinds") or ["income", "balance", "cashflow"]
-                    if sym:
-                        for ev in self._financials.collect_all(sym, statement_types=kinds,
-                                                               periods=int(args.get("periods", 3))):
-                            evs.append(self._storage.register_evidence(ev))
-                            
                 elif name == "filings":
-                    sym = str(args.get("symbol", "")).strip()
-                    if sym:
-                        for ev in self._filings.collect_filings(sym, years_back=int(args.get("years_back", 2))):
-                            evs.append(self._storage.register_evidence(ev))
-                            
-                elif name == "filings_us":
                     sym = str(args.get("symbol", "")).strip()
                     if sym:
                         for ev in self._filings.collect_filings(sym, years_back=int(args.get("years_back", 2))):

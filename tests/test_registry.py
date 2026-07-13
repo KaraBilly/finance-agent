@@ -6,14 +6,7 @@ import pytest
 from finance_agent.registry import (
     ProviderRegistry,
     create_default_registry,
-    create_cn_registry,
-    create_us_registry,
     create_llm_provider,
-)
-from finance_agent.providers.cn import (
-    EastmoneyMarketProvider,
-    EastmoneyFinancialsProvider,
-    CninfoApiFilingsProvider,
 )
 from finance_agent.providers.us import (
     FinnhubMarketProvider,
@@ -37,9 +30,8 @@ class TestProviderRegistry:
     def test_registry_creation(self):
         """Should create registry with all required providers."""
         with patch("finance_agent.providers.llm_openai.OpenAI"):
-            with patch("finance_agent.providers.cn.market_eastmoney.requests.Session"):
-                with patch("finance_agent.providers.us.market_finnhub.requests.Session"):
-                    registry = create_default_registry(market="cn")
+            with patch("finance_agent.providers.us.market_finnhub.requests.Session"):
+                registry = create_default_registry()
 
         assert isinstance(registry, ProviderRegistry)
         assert isinstance(registry.market_data, MarketDataCapability)
@@ -51,32 +43,16 @@ class TestProviderRegistry:
         assert isinstance(registry.synthesizer_llm, LLMCapability)
 
 
-class TestCreateCnRegistry:
-    """Tests for CN market registry."""
-
-    def test_uses_cn_providers(self):
-        """CN registry should use CN-specific providers."""
-        with patch("finance_agent.providers.llm_openai.OpenAI"):
-            with patch("finance_agent.providers.cn.market_eastmoney.requests.Session"):
-                registry = create_cn_registry()
-
-        assert isinstance(registry.market_data, EastmoneyMarketProvider)
-        assert isinstance(registry.financials, EastmoneyFinancialsProvider)
-        assert isinstance(registry.filings, CninfoApiFilingsProvider)
-        assert isinstance(registry.web_search, TavilyWebProvider)
-        assert isinstance(registry.storage, SQLiteStorageProvider)
-
-
-class TestCreateUsRegistry:
-    """Tests for US market registry."""
+class TestCreateDefaultRegistry:
+    """Tests for default registry creation."""
 
     @patch("finance_agent.providers.us.market_finnhub.CONFIG")
     def test_uses_us_providers(self, mock_config):
-        """US registry should use US-specific providers."""
+        """Default registry should use US providers."""
         mock_config.finnhub_api_key = "test_key"
         with patch("finance_agent.providers.llm_openai.OpenAI"):
             with patch("finance_agent.providers.us.market_finnhub.requests.Session"):
-                registry = create_us_registry()
+                registry = create_default_registry()
 
         assert isinstance(registry.market_data, FinnhubMarketProvider)
         assert isinstance(registry.financials, FinnhubFinancialsProvider)
@@ -104,25 +80,3 @@ class TestCreateLlmProvider:
         """Should raise for unknown backend."""
         with pytest.raises(ValueError, match="Unknown LLM backend"):
             create_llm_provider("unknown")
-
-
-class TestRegistryMarketSwitching:
-    """Tests for switching between CN and US markets."""
-
-    @patch("finance_agent.providers.us.market_finnhub.CONFIG")
-    def test_market_switching(self, mock_config):
-        """Should be able to create different market registries."""
-        mock_config.finnhub_api_key = "test_key"
-
-        with patch("finance_agent.providers.llm_openai.OpenAI"):
-            with patch("finance_agent.providers.cn.market_eastmoney.requests.Session"):
-                with patch("finance_agent.providers.us.market_finnhub.requests.Session"):
-                    cn_registry = create_default_registry(market="cn")
-                    us_registry = create_default_registry(market="us")
-
-        assert isinstance(cn_registry.market_data, EastmoneyMarketProvider)
-        assert isinstance(us_registry.market_data, FinnhubMarketProvider)
-        assert isinstance(cn_registry.financials, EastmoneyFinancialsProvider)
-        assert isinstance(us_registry.financials, FinnhubFinancialsProvider)
-        assert isinstance(cn_registry.filings, CninfoApiFilingsProvider)
-        assert isinstance(us_registry.filings, FinnhubFilingsProvider)

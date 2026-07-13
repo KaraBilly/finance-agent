@@ -24,8 +24,7 @@ class Config:
     tavily_api_key: str
     # US Market
     finnhub_api_key: str
-    # Market selection
-    market: str  # "cn" or "us"
+    # Paths
     data_dir: Path
     output_dir: Path
     cache_dir: Path
@@ -56,8 +55,6 @@ class Config:
             tavily_api_key=os.getenv("TAVILY_API_KEY", ""),
             # US Market
             finnhub_api_key=os.getenv("FINNHUB_API_KEY", ""),
-            # Market selection
-            market=os.getenv("FA_MARKET", "cn"),
             # Paths
             data_dir=data_dir,
             output_dir=output_dir,

@@ -19,44 +19,27 @@ import logging
 from typing import Any
 
 from ..capabilities.llm import LLMCapability, ChatMessage
-from ..config import CONFIG
 
 log = logging.getLogger(__name__)
 
-# Market-specific system prompts
-SYSTEM_CN = """You are the planning module of a Chinese A-share personal finance agent.
+# Unified system prompt - market determined by semantic analysis of user question
+SYSTEM = """You are the planning module of a personal finance agent that supports both US and Chinese A-share markets.
 Given the user question and their stored preferences, output a JSON ToolPlan that
 selects which tools to call and with what arguments. Available tools:
 
-  market_cn.index     args: {symbols:[str], years:int}    # A-share index summaries from local 20y cache
-  market_cn.stock     args: {symbol:str, lookback_days:int}  # single-stock price behaviour
+  market.index        args: {symbols:[str], years:int}    # index summaries (supports both US and A-share indices)
+  market.stock        args: {symbol:str, lookback_days:int}  # single-stock price behaviour
   financials          args: {symbol:str, kinds:[income|balance|cashflow], periods:int}
-  filings             args: {symbol:str, years_back:int}   # cninfo annual reports + notices
+  filings             args: {symbol:str, years_back:int}   # SEC filings for US, cninfo for A-share
   web                 args: {queries:[str]}                # Tavily + Trafilatura for news/opinion
 
 Rules:
-- Prefer structured tools (financials/filings/market_cn) over web when the question is factual.
+- Determine the market (US or A-share) from the user question semantics, not from any configuration.
+- For US stocks: use US stock symbols (e.g., AAPL, TSLA, SPY, QQQ).
+- For A-share stocks: use A-share stock symbols (e.g., 000001, 600000, 上证指数).
+- Prefer structured tools (financials/filings/market) over web when the question is factual.
 - If the question mentions liquidity/debt/cash flow, always include financials with the relevant statement.
 - If the question asks about competition/risk factors qualitatively, include web + filings.
-- If entities are unclear, still return a plan; put a web query to disambiguate.
-- User preferences (topics with weights) should influence tool selection AND `answer_sections`.
-- Return STRICT JSON only, no prose. Keys: intent, entities, tools, answer_sections.
-"""
-
-SYSTEM_US = """You are the planning module of a US stock personal finance agent.
-Given the user question and their stored preferences, output a JSON ToolPlan that
-selects which tools to call and with what arguments. Available tools:
-
-  market_us.index     args: {symbols:[str], years:int}    # US index summaries (QQQ, SPY, DIA)
-  market_us.stock     args: {symbol:str, lookback_days:int}  # single-stock price behaviour
-  financials_us       args: {symbol:str, kinds:[income|balance|cashflow], periods:int}
-  filings_us          args: {symbol:str, years_back:int}   # SEC filings
-  web                 args: {queries:[str]}                # Tavily + Trafilatura for news/opinion
-
-Rules:
-- Prefer structured tools (financials_us/filings_us/market_us) over web when the question is factual.
-- If the question mentions liquidity/debt/cash flow, always include financials_us with the relevant statement.
-- If the question asks about competition/risk factors qualitatively, include web + filings_us.
 - If entities are unclear, still return a plan; put a web query to disambiguate.
 - User preferences (topics with weights) should influence tool selection AND `answer_sections`.
 - Return STRICT JSON only, no prose. Keys: intent, entities, tools, answer_sections.
@@ -65,14 +48,11 @@ Rules:
 
 def plan(model: LLMCapability, question: str, prefs: list[dict], 
          history: list[dict[str, str]] | None = None) -> dict[str, Any]:
-    # Select system prompt based on market configuration
-    market = CONFIG.market
-    system = SYSTEM_US if market == "us" else SYSTEM_CN
-    
+    # Use unified system prompt - market determined by semantic analysis
     prefs_str = "\n".join(f"- {p['topic']} (weight={p['weight']:.2f})" for p in prefs) or "(none)"
     
     # Build messages with optional conversation history
-    messages = [ChatMessage("system", system)]
+    messages = [ChatMessage("system", SYSTEM)]
     
     # Add conversation history if available
     if history:
