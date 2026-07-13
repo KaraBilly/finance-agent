@@ -26,6 +26,7 @@ from typing import Any
 
 from ..capabilities.base import Evidence
 from ..registry import ProviderRegistry, create_default_registry
+from ..retrieval.unified_retriever import UnifiedRetriever
 from . import planner, synthesizer, verifier, memory
 from .conversation_manager import ConversationManager, ConversationContext
 
@@ -102,6 +103,9 @@ class AgentLoop:
         self._web = self.registry.web_search
         self._storage = self.registry.storage
         
+        # Initialize unified retriever for RAG
+        self._retriever = UnifiedRetriever(self.registry)
+        
         # Initialize conversation manager for multi-turn support
         self._conversation_manager = ConversationManager(self._storage)
 
@@ -158,6 +162,46 @@ class AgentLoop:
                 log.exception("tool %s failed: %s", name, e)
         return evs
 
+    def _is_ashare_symbol(self, symbol: str) -> bool:
+        """Check if symbol is A-share (6-digit numeric)."""
+        return bool(re.match(r"^\d{6}$", symbol))
+
+    def _is_us_symbol(self, symbol: str) -> bool:
+        """Check if symbol is US stock (alphabetic)."""
+        return bool(re.match(r"^[A-Z]{1,5}$", symbol)) and not self._is_ashare_symbol(symbol)
+
+    def _infer_market(self, tool_calls: list[dict]) -> str:
+        """Infer market from tool calls."""
+        for t in tool_calls:
+            args = t.get("args") or t.get("arguments") or {}
+            sym = str(args.get("symbol", "")).strip()
+            if sym:
+                if self._is_ashare_symbol(sym):
+                    return "cn"
+                elif self._is_us_symbol(sym):
+                    return "us"
+        return "unknown"
+
+    def _infer_external_kinds(self, tool_calls: list[dict]) -> list[str] | None:
+        """Infer which external data sources to search based on planned tools.
+        
+        Returns None to search all sources, or a list of specific kinds.
+        """
+        kinds = set()
+        for t in tool_calls:
+            name = t.get("tool") or t.get("name") or ""
+            if name in ("market.index", "market.stock"):
+                kinds.add("market")
+            elif name == "financials":
+                kinds.add("financials")
+            elif name == "filings":
+                kinds.add("filings")
+        
+        # If no specific tools, search all external data
+        if not kinds:
+            return None
+        return list(kinds)
+
     # ---------- one turn ----------
     def ask(self, question: str, conversation_id: str | None = None) -> AgentResult:
         t0 = time.time()
@@ -189,11 +233,53 @@ class AgentLoop:
         plan_obj = planner.plan(self._planner_llm, question, prefs, history=history)
         trace["plan"] = plan_obj
 
-        # 2. Tools (via Capabilities)
-        evs = self._run_tools(plan_obj.get("tools", []))
-        trace["evidence_count"] = len(evs)
+        # 2. Tools (via Capabilities) + External Data RAG
+        # Determine market from tool calls
+        market = self._infer_market(plan_obj.get("tools", []))
+        trace["detected_market"] = market
+        
+        # For A-share: skip API tools, use external data only
+        # For US: use API tools as before
+        if market == "cn":
+            log.info("A-share detected, using external data only (no API calls)")
+            evs = []
+        else:
+            evs = self._run_tools(plan_obj.get("tools", []))
+        
+        trace["evidence_count_from_tools"] = len(evs)
+        
+        # 2.5 Retrieve from external data via RAG
+        # For A-share: always search external data
+        # For US: search external data as supplement (optional, can be disabled)
+        try:
+            # Determine which external data sources to search based on tools used
+            external_kinds = self._infer_external_kinds(plan_obj.get("tools", []))
+            
+            # For A-share: always use external data
+            # For US: skip external data RAG (already got API data from tools)
+            if market == "cn":
+                rag_evs = self._retriever.retrieve(
+                    question,
+                    plan=plan_obj,
+                    use_external=True,
+                    use_web=False,
+                    external_kinds=external_kinds,
+                    final_top=12,
+                )
+                evs.extend(rag_evs)
+                trace["evidence_count_from_rag"] = len(rag_evs)
+                log.info("RAG retrieved %d evidence from external data", len(rag_evs))
+            else:
+                # US stocks: skip external data RAG to avoid duplication with API data
+                trace["evidence_count_from_rag"] = 0
+                log.info("US stock detected, skipping external data RAG (using API data)")
+        except Exception as e:
+            log.warning("External data RAG failed: %s", e)
+            trace["evidence_count_from_rag"] = 0
+        
+        # If still no evidence, fallback to web search
         if not evs:
-            log.info("no evidence from planned tools, falling back to web")
+            log.info("no evidence from tools or RAG, falling back to web")
             try:
                 for ev in self._web.search_and_extract(
                     question, max_results=6, final_top=5, reranker=self._planner_llm
@@ -208,6 +294,8 @@ class AgentLoop:
         MAX_EV = 24
         if len(evs) > MAX_EV:
             evs = evs[:MAX_EV]
+
+        trace["evidence_count_total"] = len(evs)
 
         raw_sections = plan_obj.get("answer_sections") or ["Summary", "Key Numbers", "Risks", "Evidence"]
         sections: list[str] = [s for s in raw_sections if isinstance(s, str)]

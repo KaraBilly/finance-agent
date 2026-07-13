@@ -33,6 +33,12 @@ class Config:
     # Logging
     log_level: str
 
+    # External Data (RAG)
+    use_external_data: bool
+    external_market_dir: Path | None
+    external_financials_dir: Path | None
+    external_filings_dir: Path | None
+
     @staticmethod
     def load() -> "Config":
         data_dir = Path(os.getenv("FA_DATA_DIR", ROOT / "data")).resolve()
@@ -40,6 +46,12 @@ class Config:
         cache_dir = Path(os.getenv("FA_CACHE_DIR", data_dir / "cache")).resolve()
         db_path = Path(os.getenv("FA_DB_PATH", data_dir / "finance_agent.db")).resolve()
         indices_dir = (data_dir / "indices").resolve()
+        
+        # External data directories
+        ext_market = os.getenv("FA_EXTERNAL_MARKET_DIR")
+        ext_financials = os.getenv("FA_EXTERNAL_FINANCIALS_DIR")
+        ext_filings = os.getenv("FA_EXTERNAL_FILINGS_DIR")
+        
         for p in (data_dir, output_dir, cache_dir, indices_dir):
             p.mkdir(parents=True, exist_ok=True)
         return Config(
@@ -62,6 +74,11 @@ class Config:
             db_path=db_path,
             indices_dir=indices_dir,
             log_level=os.getenv("FA_LOG_LEVEL", "INFO"),
+            # External Data
+            use_external_data=os.getenv("FA_USE_EXTERNAL_DATA", "true").lower() == "true",
+            external_market_dir=Path(ext_market).resolve() if ext_market else None,
+            external_financials_dir=Path(ext_financials).resolve() if ext_financials else None,
+            external_filings_dir=Path(ext_filings).resolve() if ext_filings else None,
         )
 
     def require(self, *names: str) -> None:

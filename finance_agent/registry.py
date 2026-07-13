@@ -79,12 +79,13 @@ def create_llm_provider(
 def _build_data_providers():
     """Build data providers for both US and A-share markets.
     
-    Returns providers that can handle both markets based on semantic analysis.
+    A-share uses external data (local files) only.
+    US uses Finnhub API.
     """
     from .providers.cn import (
-        EastmoneyMarketProvider,
-        EastmoneyFinancialsProvider,
-        CninfoApiFilingsProvider,
+        ExternalAshareMarketProvider,
+        ExternalAshareFinancialsProvider,
+        ExternalAshareFilingsProvider,
     )
     from .providers.us import (
         FinnhubMarketProvider,
@@ -96,12 +97,12 @@ def _build_data_providers():
         SQLiteStorageProvider,
     )
     
-    # For now, default to US providers as they have broader coverage
-    # The actual market is determined by semantic analysis in the planner
+    # A-share uses external data (local files) only
+    # US uses Finnhub API
     return {
-        "market_data": FinnhubMarketProvider(),
-        "financials": FinnhubFinancialsProvider(),
-        "filings": FinnhubFilingsProvider(),
+        "market_data": ExternalAshareMarketProvider(),
+        "financials": ExternalAshareFinancialsProvider(),
+        "filings": ExternalAshareFilingsProvider(),
         "web_search": TavilyWebProvider(),
         "storage": SQLiteStorageProvider(),
     }

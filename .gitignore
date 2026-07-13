@@ -9,10 +9,7 @@ venv/
 .vscode/
 
 # Runtime data (keep the dir, ignore contents)
-data/*.db
-data/cache/
-data/indices/*.parquet
-data/ca-bundle.pem
+data
 outputs/*
 !outputs/.gitkeep
 
