@@ -39,6 +39,12 @@ class Config:
     external_financials_dir: Path | None
     external_filings_dir: Path | None
 
+    # Milvus Vector Database
+    use_milvus: bool
+    milvus_host: str
+    milvus_port: str
+    milvus_collection: str
+
     @staticmethod
     def load() -> "Config":
         data_dir = Path(os.getenv("FA_DATA_DIR", ROOT / "data")).resolve()
@@ -79,6 +85,11 @@ class Config:
             external_market_dir=Path(ext_market).resolve() if ext_market else None,
             external_financials_dir=Path(ext_financials).resolve() if ext_financials else None,
             external_filings_dir=Path(ext_filings).resolve() if ext_filings else None,
+            # Milvus
+            use_milvus=os.getenv("FA_USE_MILVUS", "true").lower() == "true",
+            milvus_host=os.getenv("FA_MILVUS_HOST", "localhost"),
+            milvus_port=os.getenv("FA_MILVUS_PORT", "19530"),
+            milvus_collection=os.getenv("FA_MILVUS_COLLECTION", "finance_docs"),
         )
 
     def require(self, *names: str) -> None:
