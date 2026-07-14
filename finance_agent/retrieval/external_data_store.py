@@ -64,36 +64,10 @@ class ExternalDataStore:
         self._docs: list[tuple[str, dict[str, Any], str]] = []
         self._loaded = False
         
-        # Embedding search
+        # Embedding search — lazy init on first use to avoid heavy model
+        # download when the store is instantiated but never queried.
         self._embedding_search = None
-        if self.use_embedding:
-            try:
-                from ..retrieval.embedding_search import EmbeddingSearch
-                self._embedding_search = EmbeddingSearch(
-                    model_name=_EMBEDDING_MODEL,
-                    use_milvus=self.use_milvus,
-                    milvus_host=getattr(CONFIG, 'milvus_host', None),
-                    milvus_port=getattr(CONFIG, 'milvus_port', None),
-                    milvus_collection=getattr(CONFIG, 'milvus_collection', None),
-                )
-                # If the embedder failed to load (sentence-transformers not
-                # installed, model download failure, etc.), turn off the
-                # embedding path entirely so ``search`` doesn't spend every
-                # call on a try/except that logs a misleading "Milvus search
-                # failed" line.
-                if not getattr(self._embedding_search, "is_ready", True):
-                    log.warning(
-                        "Embedding search disabled: embedder not ready. "
-                        "Install with: pip install 'sentence-transformers>=2.2.0'"
-                    )
-                    self.use_embedding = False
-                    self._embedding_search = None
-                else:
-                    log.info("Embedding search initialized with model: %s (Milvus: %s)",
-                            _EMBEDDING_MODEL, self.use_milvus)
-            except Exception as e:
-                log.warning("Failed to initialize embedding search: %s", e)
-                self.use_embedding = False
+        self._embedding_search_ready = False
 
     # ------------------------------------------------------------------ loading
 
@@ -132,16 +106,55 @@ class ExternalDataStore:
         self._loaded = True
         log.info("Loaded %d chunks from external data", count)
         
-        # Build embedding index
-        if self.use_embedding and self._embedding_search is not None:
+        # Build embedding index (lazy-init embedder if needed)
+        if self.use_embedding:
             try:
                 self._build_embedding_index()
             except Exception as e:
                 log.warning("Failed to build embedding index: %s", e)
 
+    def _ensure_embedding_search(self):
+        """Lazy-init embedding search on first use."""
+        if not self.use_embedding:
+            return
+        if self._embedding_search is not None:
+            return
+        if self._embedding_search_ready:
+            return
+        
+        try:
+            from ..config import CONFIG
+            from ..retrieval.embedding_search import EmbeddingSearch
+            self._embedding_search = EmbeddingSearch(
+                model_name=_EMBEDDING_MODEL,
+                use_milvus=self.use_milvus,
+                milvus_host=getattr(CONFIG, 'milvus_host', None),
+                milvus_port=getattr(CONFIG, 'milvus_port', None),
+                milvus_collection=getattr(CONFIG, 'milvus_collection', None),
+            )
+            if not getattr(self._embedding_search, "is_ready", True):
+                log.warning(
+                    "Embedding search disabled: embedder not ready. "
+                    "Install with: pip install 'sentence-transformers>=2.2.0'"
+                )
+                self.use_embedding = False
+                self._embedding_search = None
+            else:
+                log.info("Embedding search initialized with model: %s (Milvus: %s)",
+                        _EMBEDDING_MODEL, self.use_milvus)
+                self._embedding_search_ready = True
+        except Exception as e:
+            log.warning("Failed to initialize embedding search: %s", e)
+            self.use_embedding = False
+            self._embedding_search = None
+
     def _build_embedding_index(self):
         """Build embedding index for semantic search."""
         if not self._docs:
+            return
+        
+        self._ensure_embedding_search()
+        if self._embedding_search is None:
             return
         
         log.info("Building embedding index...")
@@ -474,7 +487,9 @@ class ExternalDataStore:
         pre = [candidates[i] for i in top_idx]
         
         # Embedding-based semantic search (if enabled)
-        if self.use_embedding and self._embedding_search is not None:
+        if self.use_embedding:
+            self._ensure_embedding_search()
+        if self._embedding_search is not None:
             try:
                 embedding_results = self._embedding_search.search(
                     query,
@@ -570,6 +585,8 @@ class ExternalDataStore:
                 stats["embedding"] = emb_stats
             except Exception:
                 pass
+        elif self.use_embedding and not self._embedding_search_ready:
+            stats["embedding"] = "not_initialized"
         
         return stats
 

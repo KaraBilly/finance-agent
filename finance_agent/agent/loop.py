@@ -263,11 +263,19 @@ class AgentLoop:
 
         # 2a. For US: hit real APIs (Finnhub).
         #     For CN: skip API tools entirely and rely on RAG over local files.
-        if market == "cn":
-            log.info("A-share detected, using external data only (no API calls)")
+        #     If planner explicitly selects web, skip local RAG and go straight to web.
+        tools = plan_obj.get("tools", [])
+        tool_names = [t.get("tool") if isinstance(t, dict) else t for t in tools]
+        use_web_only = "web" in tool_names
+
+        if market == "cn" and use_web_only:
+            log.info("A-share detected, but planner selected web tool → skipping local RAG")
             evs: list[Evidence] = []
+        elif market == "cn":
+            log.info("A-share detected, using external data only (no API calls)")
+            evs = []
         else:
-            evs = self._run_tools(plan_obj.get("tools", []), providers)
+            evs = self._run_tools(tools, providers)
 
         trace["evidence_count_from_tools"] = len(evs)
 
@@ -275,8 +283,8 @@ class AgentLoop:
         #     CN → primary evidence source (local files).
         #     US → skip (API tools already provided authoritative data).
         try:
-            external_kinds = self._infer_external_kinds(plan_obj.get("tools", []))
-            if market == "cn":
+            external_kinds = self._infer_external_kinds(tools)
+            if market == "cn" and not use_web_only:
                 rag_evs = self._retriever.retrieve(
                     question,
                     plan=plan_obj,
@@ -290,7 +298,10 @@ class AgentLoop:
                 log.info("RAG retrieved %d evidence from external data", len(rag_evs))
             else:
                 trace["evidence_count_from_rag"] = 0
-                log.info("US stock detected, skipping external data RAG (using API data)")
+                if market != "cn":
+                    log.info("US stock detected, skipping external data RAG (using API data)")
+                else:
+                    log.info("Web tool selected, skipping external data RAG")
         except Exception as e:
             log.warning("External data RAG failed: %s", e)
             trace["evidence_count_from_rag"] = 0

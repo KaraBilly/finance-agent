@@ -148,7 +148,7 @@ class EmbeddingSearch:
         """Download and load embedding model."""
         try:
             log.info(f"Downloading embedding model: {self.model_name}")
-            self._model = SentenceTransformer(self.model_name)
+            self._model = SentenceTransformer(self.model_name, device="cpu")
             self._embedding_dim = self._model.get_sentence_embedding_dimension()
             log.info(f"Embedding model downloaded and loaded successfully (dim={self._embedding_dim})")
         except Exception as e:
@@ -159,7 +159,7 @@ class EmbeddingSearch:
         """Load local embedding model."""
         try:
             log.info(f"Loading embedding model: {self.model_name}")
-            self._model = SentenceTransformer(self.model_name)
+            self._model = SentenceTransformer(self.model_name, device="cpu")
             self._embedding_dim = self._model.get_sentence_embedding_dimension()
             log.info(f"Embedding model loaded successfully (dim={self._embedding_dim})")
         except Exception as e:

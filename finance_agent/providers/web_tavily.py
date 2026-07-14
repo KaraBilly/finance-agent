@@ -140,6 +140,44 @@ class TavilyWebProvider(WebSearchCapability):
                              search_depth="advanced", include_answer=False)
         return resp.get("results", [])
 
+    def _extract_pdf(self, url: str) -> str:
+        """Download and extract text from a PDF URL."""
+        try:
+            import fitz  # PyMuPDF
+            
+            # Download PDF with retries
+            pdf_bytes = None
+            for attempt in range(1, 4):
+                try:
+                    resp = requests.get(url, headers=_DEFAULT_HEADERS, timeout=30)
+                    resp.raise_for_status()
+                    pdf_bytes = resp.content
+                    break
+                except Exception as e:
+                    log.debug("PDF download attempt %d failed for %s: %s", attempt, url, e)
+                    if attempt < 3:
+                        time.sleep(2 ** attempt)
+            
+            if not pdf_bytes:
+                return ""
+            
+            # Extract text using PyMuPDF
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            full_text = ""
+            for page_num in range(len(doc)):
+                page = doc[page_num]
+                full_text += page.get_text()
+            doc.close()
+            
+            return full_text.strip()
+            
+        except ImportError:
+            log.warning("PyMuPDF not installed. Cannot process PDF: %s", url)
+            return ""
+        except Exception as e:
+            log.warning("Failed to extract PDF %s: %s", url, e)
+            return ""
+
     def extract_content(self, url: str, fallback_snippet: str = "") -> str:
         # SSRF guard applied here as well so trafilatura.fetch_url cannot be
         # used to reach internal hosts (it does its own request).
@@ -150,35 +188,43 @@ class TavilyWebProvider(WebSearchCapability):
         if cache.exists():
             return cache.read_text(encoding="utf-8", errors="ignore")
         
-        html = None
+        # Check if URL is a PDF
+        is_pdf = url.lower().endswith('.pdf') or '.pdf?' in url.lower()
         
-        # Try trafilatura first (handles JS-heavy sites). We drop ``no_ssl``:
-        # accepting untrusted TLS opens the door to MITM'd tampering of the
-        # evidence we feed into the model.
-        try:
-            html = trafilatura.fetch_url(url)
-        except Exception as e:
-            log.debug("trafilatura fetch_url failed for %s: %s", url, e)
-        
-        # Fallback to requests with retries if trafilatura fails
-        if not html:
-            try:
-                html = _fetch_with_retry(url)
-            except Exception as e:
-                log.debug("requests fallback failed for %s: %s", url, e)
-        
-        # Extract text from HTML
         text = ""
-        if html:
+        
+        if is_pdf:
+            # Use PDF extraction for PDF URLs
+            log.info("Detected PDF URL, using PyMuPDF extraction: %s", url)
+            text = self._extract_pdf(url)
+        else:
+            # Try trafilatura first (handles JS-heavy sites). We drop ``no_ssl``:
+            # accepting untrusted TLS opens the door to MITM'd tampering of the
+            # evidence we feed into the model.
+            html = None
             try:
-                text = trafilatura.extract(
-                    html,
-                    include_comments=False,
-                    include_tables=True,
-                    favor_precision=True,
-                ) or ""
+                html = trafilatura.fetch_url(url)
             except Exception as e:
-                log.debug("trafilatura extract failed for %s: %s", url, e)
+                log.debug("trafilatura fetch_url failed for %s: %s", url, e)
+            
+            # Fallback to requests with retries if trafilatura fails
+            if not html:
+                try:
+                    html = _fetch_with_retry(url)
+                except Exception as e:
+                    log.debug("requests fallback failed for %s: %s", url, e)
+            
+            # Extract text from HTML
+            if html:
+                try:
+                    text = trafilatura.extract(
+                        html,
+                        include_comments=False,
+                        include_tables=True,
+                        favor_precision=True,
+                    ) or ""
+                except Exception as e:
+                    log.debug("trafilatura extract failed for %s: %s", url, e)
         
         # Fallback to snippet if all extraction methods fail
         if not text:

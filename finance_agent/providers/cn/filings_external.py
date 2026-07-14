@@ -136,11 +136,24 @@ class ExternalAshareFilingsProvider(FilingsCapability):
         for file_path in files[:years_back * 2]:  # Limit to reasonable number
             try:
                 if file_path.suffix.lower() == ".pdf":
-                    # Skip PDFs for now (would need PDF parsing)
-                    continue
-
-                with open(file_path, "r", encoding="utf-8") as f:
-                    text = f.read()
+                    # Parse PDF using PyMuPDF
+                    try:
+                        import fitz
+                        doc = fitz.open(file_path)
+                        text = ""
+                        for page_num in range(len(doc)):
+                            page = doc[page_num]
+                            text += page.get_text()
+                        doc.close()
+                    except ImportError:
+                        log.warning("PyMuPDF not installed. Skipping PDF: %s", file_path)
+                        continue
+                    except Exception as e:
+                        log.warning("Failed to parse PDF %s: %s", file_path, e)
+                        continue
+                else:
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        text = f.read()
             except Exception:
                 try:
                     with open(file_path, "r", encoding="gbk") as f:
