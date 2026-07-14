@@ -170,8 +170,13 @@ class AgentLoop:
         """Check if symbol is US stock (alphabetic)."""
         return bool(re.match(r"^[A-Z]{1,5}$", symbol)) and not self._is_ashare_symbol(symbol)
 
-    def _infer_market(self, tool_calls: list[dict]) -> str:
-        """Infer market from tool calls."""
+    def _infer_market(self, tool_calls: list[dict], question: str = "") -> str:
+        """Infer market from tool calls and question.
+        
+        Returns:
+            "cn" for A-share, "us" for US stocks, "unknown" if cannot determine.
+        """
+        # First try to infer from tool calls (symbol)
         for t in tool_calls:
             args = t.get("args") or t.get("arguments") or {}
             sym = str(args.get("symbol", "")).strip()
@@ -180,6 +185,25 @@ class AgentLoop:
                     return "cn"
                 elif self._is_us_symbol(sym):
                     return "us"
+        
+        # Fallback: infer from question text
+        if question:
+            # Check for A-share patterns
+            # 6-digit numeric codes (A-share)
+            if re.search(r'\b\d{6}\b', question):
+                return "cn"
+            
+            # Chinese stock names (common A-share companies)
+            cn_names = ['比亚迪', '宁德时代', '中际旭创', '贵州茅台', '中国平安', 
+                       '招商银行', '五粮液', '美的集团', '格力电器', '海康威视']
+            for name in cn_names:
+                if name in question:
+                    return "cn"
+            
+            # US stock patterns (alphabetic, 1-5 chars, uppercase)
+            if re.search(r'\b[A-Z]{1,5}\b', question):
+                return "us"
+        
         return "unknown"
 
     def _infer_external_kinds(self, tool_calls: list[dict]) -> list[str] | None:
@@ -234,8 +258,8 @@ class AgentLoop:
         trace["plan"] = plan_obj
 
         # 2. Tools (via Capabilities) + External Data RAG
-        # Determine market from tool calls
-        market = self._infer_market(plan_obj.get("tools", []))
+        # Determine market from tool calls and question
+        market = self._infer_market(plan_obj.get("tools", []), question=question)
         trace["detected_market"] = market
         
         # For A-share: skip API tools, use external data only

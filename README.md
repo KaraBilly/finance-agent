@@ -50,7 +50,7 @@ python -m finance_agent init
 ```
 
 ### 4. 提问 (单轮)
-
+ch
 ```bash
 python -m finance_agent ask "Apple(AAPL) 的主要风险因素有哪些?"
 ```
@@ -251,4 +251,4 @@ export FA_MARKET=cn   # A 股 (需东财/cninfo API)
 - filings 目前只获取 SEC 公告标题+URL,未抽取 PDF 正文中的风险因子章节
 - Verifier 只查引用一致性,不判证据真伪
 - 多轮对话已实现 PydanticAI 风格依赖注入,但尚未使用 PydanticAI 的 `Agent` 类和 `RunContext` 获得自动重试、流式输出等高级功能
-- 未做 embedding 向量检索,BM25+LLM rerank 对 demo 规模够用
+- ✅ **已支持 embedding 向量检索** — 安装时自动下载 `BAAI/bge-large-zh-v1.5` 模型,支持语义搜索

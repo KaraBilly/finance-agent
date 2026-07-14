@@ -26,7 +26,7 @@ from ..capabilities.llm import LLMCapability
 log = logging.getLogger(__name__)
 
 # File extensions we support
-_SUPPORTED_EXTS = {".csv", ".json", ".jsonl", ".md", ".txt"}
+_SUPPORTED_EXTS = {".csv", ".json", ".jsonl", ".md", ".txt", ".pdf"}
 
 # Chunking config
 _CHUNK_SIZE = 800
@@ -139,6 +139,8 @@ class ExternalDataStore:
             return self._load_json(file_path, source_kind)
         elif ext in (".md", ".txt"):
             return self._load_text(file_path, source_kind)
+        elif ext == ".pdf":
+            return self._load_pdf(file_path, source_kind)
         else:
             return []
 
@@ -297,19 +299,107 @@ class ExternalDataStore:
 
         return chunks
 
+    def _load_pdf(
+        self, file_path: Path, source_kind: str
+    ) -> list[tuple[str, dict[str, Any], str]]:
+        """Load PDF file and extract text for chunking."""
+        try:
+            import fitz  # PyMuPDF
+            
+            docs = []
+            symbol = self._extract_symbol_from_filename(file_path.name)
+            
+            # Open PDF
+            doc = fitz.open(file_path)
+            
+            # Extract text from all pages
+            full_text = ""
+            for page_num in range(len(doc)):
+                page = doc[page_num]
+                full_text += page.get_text()
+            
+            doc.close()
+            
+            if not full_text.strip():
+                log.warning("No text extracted from PDF: %s", file_path)
+                return []
+            
+            # Use SemanticChunker for better chunking
+            try:
+                from ..retrieval.semantic_chunker import SemanticChunker
+                chunks = SemanticChunker.chunk_text(full_text, source_kind=source_kind, symbol=symbol)
+                for text, meta in chunks:
+                    meta["file"] = str(file_path)
+                    meta["source_kind"] = source_kind
+                    docs.append((text, meta, source_kind))
+            except Exception as e:
+                log.warning("Semantic chunking failed for PDF %s: %s", file_path, e)
+                # Fallback to simple chunking
+                chunks = self._chunk_text(full_text)
+                for i, chunk in enumerate(chunks):
+                    meta = {
+                        "file": str(file_path),
+                        "symbol": symbol,
+                        "chunk_index": i,
+                        "total_chunks": len(chunks),
+                        "source_kind": source_kind,
+                    }
+                    docs.append((chunk, meta, source_kind))
+            
+            return docs
+            
+        except ImportError:
+            log.warning("PyMuPDF not installed. Cannot process PDF: %s", file_path)
+            return []
+        except Exception as e:
+            log.warning("Failed to load PDF %s: %s", file_path, e)
+            return []
+
     def _extract_symbol_from_filename(self, filename: str) -> str | None:
-        """Try to extract stock symbol from filename."""
-        # Common patterns: AAPL_2024.csv, 000001_financials.json, etc.
+        """Extract stock symbol or company name from filename.
+        
+        Supports:
+        - US symbols: AAPL_2024.csv, MSFT-report.pdf
+        - A-share codes: 000001_financials.json, 002594_daily.csv
+        - Chinese names: 比亚迪2025年报.pdf, 宁德时代_财报.pdf
+        """
+        # Pattern 1: US symbols (AAPL, MSFT)
         patterns = [
-            r"^([A-Z]{1,5})[_\-]",  # US symbols: AAPL_, MSFT-
-            r"^(\d{6})[_\-]",  # A-share: 000001_, 600000-
+            r"^([A-Z]{1,5})[_\-]",  # AAPL_, MSFT-
+            r"^([A-Z]{1,5})\d",  # AAPL2024
             r"[_\-]([A-Z]{1,5})\.",  # _AAPL.csv
-            r"[_\-](\d{6})\.",  # _000001.csv
         ]
         for pattern in patterns:
             match = re.search(pattern, filename)
             if match:
                 return match.group(1)
+        
+        # Pattern 2: A-share codes (6-digit)
+        code_patterns = [
+            r"^(\d{6})[_\-]",  # 000001_, 002594_
+            r"[_\-](\d{6})\.",  # _000001.csv
+            r"^(\d{6})\D",  # 002594daily
+        ]
+        for pattern in code_patterns:
+            match = re.search(pattern, filename)
+            if match:
+                return match.group(1)
+        
+        # Pattern 3: Chinese company names
+        # Common A-share company names
+        cn_companies = {
+            '比亚迪': '002594',
+            '宁德时代': '300750',
+            '中际旭创': '300308',
+            '贵州茅台': '600519',
+            '中国平安': '601318',
+            '招商银行': '600036',
+        }
+        
+        for cn_name, code in cn_companies.items():
+            if cn_name in filename:
+                return code  # Return stock code instead of name
+        
         return None
 
     # ------------------------------------------------------------------ retrieval
@@ -319,6 +409,7 @@ class ExternalDataStore:
         query: str,
         *,
         source_kinds: list[str] | None = None,
+        symbols: list[str] | None = None,
         bm25_top: int = 20,
         final_top: int = 6,
         reranker: LLMCapability | None = None,
@@ -328,6 +419,7 @@ class ExternalDataStore:
         Args:
             query: Search query
             source_kinds: Filter by source kind ("market", "financials", "filings")
+            symbols: Filter by stock symbols (e.g., ["002594", "300750"])
             bm25_top: Number of candidates after BM25
             final_top: Number of results after reranking
             reranker: LLM for reranking (optional)
@@ -342,6 +434,11 @@ class ExternalDataStore:
         candidates = self._docs
         if source_kinds:
             candidates = [d for d in candidates if d[2] in source_kinds]
+        
+        # Filter by symbols (if specified)
+        if symbols:
+            candidates = [d for d in candidates if d[1].get('symbol') in symbols]
+            log.info("Filtered by symbols %s: %d candidates", symbols, len(candidates))
 
         if not candidates:
             log.info("No external data candidates for kinds: %s", source_kinds)

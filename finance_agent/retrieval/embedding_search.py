@@ -51,6 +51,7 @@ class EmbeddingSearch:
         use_api: bool = False,
         api_key: str | None = None,
         cache_dir: Path | None = None,
+        auto_download: bool = True,
     ):
         """Initialize embedding search.
         
@@ -61,6 +62,7 @@ class EmbeddingSearch:
             use_api: Whether to use API for embeddings
             api_key: API key for embedding service
             cache_dir: Directory to cache embeddings
+            auto_download: Whether to auto-download model if not found
         """
         self.model_name = model_name or "BAAI/bge-large-zh-v1.5"
         self.use_api = use_api
@@ -74,7 +76,20 @@ class EmbeddingSearch:
         self._faiss_index = None
         
         if not use_api and SENTENCE_TRANSFORMERS_AVAILABLE:
-            self._load_local_model()
+            if auto_download:
+                self._download_and_load_model()
+            else:
+                self._load_local_model()
+    
+    def _download_and_load_model(self):
+        """Download and load embedding model."""
+        try:
+            log.info(f"Downloading embedding model: {self.model_name}")
+            self._model = SentenceTransformer(self.model_name)
+            log.info(f"Embedding model downloaded and loaded successfully")
+        except Exception as e:
+            log.error(f"Failed to download embedding model: {e}")
+            self._model = None
     
     def _load_local_model(self):
         """Load local embedding model."""

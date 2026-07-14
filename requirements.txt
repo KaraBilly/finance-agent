@@ -1,5 +1,6 @@
 # --- LLM clients ---
 openai>=1.60.0                # OpenAI-compatible SDK for Ark, DeepSeek, Walmart Gateway
+pydantic-ai>=2.0.0            # PydanticAI framework for agent implementation
 
 # --- Data sources ---
 # NOTE: A-share data is now fetched directly from the public JSON endpoints
@@ -26,5 +27,8 @@ markdown==3.7                 # md -> html
 jinja2==3.1.4
 
 # --- Utils ---
-python-dotenv==1.0.1
+python-dotenv>=1.1.0
 tenacity==9.0.0               # retries on API calls
+
+# --- PDF processing ---
+PyMuPDF>=1.23.0               # PDF text extraction (fitz)

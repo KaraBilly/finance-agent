@@ -231,7 +231,8 @@ class SemanticChunker:
                             symbol: str | None, start_index: int) -> list[tuple[str, dict]]:
         """Split a large section by sentences."""
         # Split by sentence boundaries (Chinese and English)
-        sentence_pattern = r'(?<=[。！？!?]|[.!?]\s+)'
+        # Use a simpler pattern that doesn't require fixed-width look-behind
+        sentence_pattern = r'[。！？!?]|[.!?]\s+'
         sentences = re.split(sentence_pattern, text)
         sentences = [s.strip() for s in sentences if s.strip()]
         
@@ -266,7 +267,8 @@ class SemanticChunker:
     @staticmethod
     def _extract_overlap(text: str) -> str:
         """Extract last few sentences for overlap."""
-        sentence_pattern = r'(?<=[。！？!?]|[.!?]\s+)'
+        # Use a simpler pattern that doesn't require fixed-width look-behind
+        sentence_pattern = r'[。！？!?]|[.!?]\s+'
         sentences = re.split(sentence_pattern, text)
         sentences = [s.strip() for s in sentences if s.strip()]
         

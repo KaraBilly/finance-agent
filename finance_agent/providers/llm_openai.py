@@ -45,7 +45,19 @@ class OpenAICompatibleLLM(LLMCapability):
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
         if json_mode:
-            kwargs["response_format"] = {"type": "json_object"}
+            # 火山方舟等部分模型不支持 json_object，改用 prompt 方式
+            base_url = str(self.client.base_url)
+            if "ark.cn-beijing.volces.com" in base_url:
+                # 在 system 或 user message 中追加 JSON 格式要求
+                if payload and payload[0].get("role") == "system":
+                    payload[0]["content"] += "\n\n请直接输出 JSON 格式，不要包含 markdown 代码块标记。"
+                else:
+                    payload.insert(0, {
+                        "role": "system",
+                        "content": "请直接输出 JSON 格式，不要包含 markdown 代码块标记。"
+                    })
+            else:
+                kwargs["response_format"] = {"type": "json_object"}
         log.debug("[%s] chat model=%s json=%s msgs=%d", self.name, self.model, json_mode, len(payload))
         resp = self.client.chat.completions.create(**kwargs)
         return resp.choices[0].message.content or ""
