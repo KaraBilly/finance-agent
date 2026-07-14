@@ -36,6 +36,9 @@ _CHUNK_OVERLAP = 100
 _USE_EMBEDDING = True  # Enable embedding-based search
 _EMBEDDING_MODEL = "BAAI/bge-large-zh-v1.5"  # Chinese-optimized model
 
+# Milvus configuration
+_USE_MILVUS = True  # Enable Milvus vector store
+
 
 class ExternalDataStore:
     """Store for external market/financials/filings data with RAG retrieval."""
@@ -46,6 +49,7 @@ class ExternalDataStore:
         financials_dir: Path | None = None,
         filings_dir: Path | None = None,
         use_embedding: bool = _USE_EMBEDDING,
+        use_milvus: bool = _USE_MILVUS,
     ):
         from ..config import CONFIG
 
@@ -55,6 +59,7 @@ class ExternalDataStore:
         
         self.enabled = CONFIG.use_external_data
         self.use_embedding = use_embedding
+        self.use_milvus = use_milvus
 
         # All documents: list of (text, metadata, source_kind)
         self._docs: list[tuple[str, dict[str, Any], str]] = []
@@ -65,8 +70,15 @@ class ExternalDataStore:
         if self.use_embedding:
             try:
                 from ..retrieval.embedding_search import EmbeddingSearch
-                self._embedding_search = EmbeddingSearch(model_name=_EMBEDDING_MODEL)
-                log.info("Embedding search initialized with model: %s", _EMBEDDING_MODEL)
+                self._embedding_search = EmbeddingSearch(
+                    model_name=_EMBEDDING_MODEL,
+                    use_milvus=self.use_milvus,
+                    milvus_host=getattr(CONFIG, 'milvus_host', None),
+                    milvus_port=getattr(CONFIG, 'milvus_port', None),
+                    milvus_collection=getattr(CONFIG, 'milvus_collection', None),
+                )
+                log.info("Embedding search initialized with model: %s (Milvus: %s)", 
+                        _EMBEDDING_MODEL, self.use_milvus)
             except Exception as e:
                 log.warning("Failed to initialize embedding search: %s", e)
                 self.use_embedding = False
@@ -179,7 +191,7 @@ class ExternalDataStore:
                     "file": str(file_path),
                     "symbol": symbol,
                     "rows": len(chunk_df),
-                    "source_kind": source_kind,
+                    "sourceKind": source_kind,
                 }
                 docs.append((text, meta, source_kind))
 
@@ -206,7 +218,7 @@ class ExternalDataStore:
             chunks = SemanticChunker.chunk_json(items, symbol=symbol, context=source_kind)
             for text, meta in chunks:
                 meta["file"] = str(file_path)
-                meta["source_kind"] = source_kind
+                meta["sourceKind"] = source_kind
                 docs.append((text, meta, source_kind))
         except Exception as e:
             log.warning("Semantic chunking failed for %s: %s", file_path, e)
@@ -220,7 +232,7 @@ class ExternalDataStore:
                     "file": str(file_path),
                     "symbol": symbol,
                     "items": len(chunk_items),
-                    "source_kind": source_kind,
+                    "sourceKind": source_kind,
                 }
                 docs.append((text, meta, source_kind))
 
@@ -242,7 +254,7 @@ class ExternalDataStore:
             docs = []
             for chunk_text, meta in chunks:
                 meta["file"] = str(file_path)
-                meta["source_kind"] = source_kind
+                meta["sourceKind"] = source_kind
                 docs.append((chunk_text, meta, source_kind))
             return docs
         except Exception as e:
@@ -256,7 +268,7 @@ class ExternalDataStore:
                     "symbol": symbol,
                     "chunk_index": i,
                     "total_chunks": len(chunks),
-                    "source_kind": source_kind,
+                    "sourceKind": source_kind,
                 }
                 docs.append((chunk, meta, source_kind))
             return docs
@@ -330,7 +342,7 @@ class ExternalDataStore:
                 chunks = SemanticChunker.chunk_text(full_text, source_kind=source_kind, symbol=symbol)
                 for text, meta in chunks:
                     meta["file"] = str(file_path)
-                    meta["source_kind"] = source_kind
+                    meta["sourceKind"] = source_kind
                     docs.append((text, meta, source_kind))
             except Exception as e:
                 log.warning("Semantic chunking failed for PDF %s: %s", file_path, e)
@@ -342,7 +354,7 @@ class ExternalDataStore:
                         "symbol": symbol,
                         "chunk_index": i,
                         "total_chunks": len(chunks),
-                        "source_kind": source_kind,
+                        "sourceKind": source_kind,
                     }
                     docs.append((chunk, meta, source_kind))
             
@@ -452,7 +464,12 @@ class ExternalDataStore:
         # Embedding-based semantic search (if enabled)
         if self.use_embedding and self._embedding_search is not None:
             try:
-                embedding_results = self._embedding_search.search(query, top_k=bm25_top)
+                embedding_results = self._embedding_search.search(
+                    query, 
+                    top_k=bm25_top,
+                    source_kinds=source_kinds,
+                    symbols=symbols,
+                )
                 # Merge with BM25 results
                 seen_texts = {p[0] for p in pre}
                 for doc_text, score, meta in embedding_results:
@@ -509,4 +526,13 @@ class ExternalDataStore:
         for _, _, kind in self._docs:
             if kind in stats:
                 stats[kind] += 1
+        
+        # Add embedding stats if available
+        if self.use_embedding and self._embedding_search is not None:
+            try:
+                emb_stats = self._embedding_search.get_stats()
+                stats["embedding"] = emb_stats
+            except Exception:
+                pass
+        
         return stats

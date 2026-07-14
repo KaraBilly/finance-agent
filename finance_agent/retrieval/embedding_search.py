@@ -1,7 +1,7 @@
 """Embedding-based semantic search for RAG.
 
-Provides embedding-based retrieval as an alternative/complement to BM25.
-Uses sentence-transformers for local embeddings or API-based embeddings.
+Provides embedding-based retrieval using Milvus vector database.
+Supports both local sentence-transformers and API-based embeddings.
 
 Usage:
     from finance_agent.retrieval.embedding_search import EmbeddingSearch
@@ -29,20 +29,23 @@ except ImportError:
     SENTENCE_TRANSFORMERS_AVAILABLE = False
     log.warning("sentence-transformers not installed. Embedding search will use fallback.")
 
+# Try to import Milvus
 try:
-    import faiss
-    FAISS_AVAILABLE = True
+    from ..retrieval.milvus_store import MilvusStore
+    MILVUS_AVAILABLE = True
 except ImportError:
-    FAISS_AVAILABLE = False
-    log.warning("faiss not installed. Will use numpy for similarity search.")
+    MILVUS_AVAILABLE = False
+    log.warning("pymilvus not installed. Will use numpy for similarity search.")
 
 
 class EmbeddingSearch:
-    """Embedding-based semantic search.
+    """Embedding-based semantic search using Milvus vector database.
     
     Supports multiple embedding models:
-    - Local: sentence-transformers (all-MiniLM-L6-v2, etc.)
+    - Local: sentence-transformers (all-MiniLM-L6-v2, BAAI/bge-large-zh-v1.5, etc.)
     - API: OpenAI, Doubao, etc.
+    
+    Uses Milvus as the vector store backend (replaces FAISS).
     """
     
     def __init__(
@@ -52,6 +55,10 @@ class EmbeddingSearch:
         api_key: str | None = None,
         cache_dir: Path | None = None,
         auto_download: bool = True,
+        use_milvus: bool = True,
+        milvus_host: str | None = None,
+        milvus_port: str | None = None,
+        milvus_collection: str | None = None,
     ):
         """Initialize embedding search.
         
@@ -63,6 +70,10 @@ class EmbeddingSearch:
             api_key: API key for embedding service
             cache_dir: Directory to cache embeddings
             auto_download: Whether to auto-download model if not found
+            use_milvus: Whether to use Milvus vector store
+            milvus_host: Milvus server host
+            milvus_port: Milvus server port
+            milvus_collection: Milvus collection name
         """
         self.model_name = model_name or "BAAI/bge-large-zh-v1.5"
         self.use_api = use_api
@@ -70,23 +81,47 @@ class EmbeddingSearch:
         self.cache_dir = cache_dir
         
         self._model = None
+        self._embedding_dim = None
+        
+        # In-memory fallback
         self._embeddings: np.ndarray | None = None
         self._documents: list[str] = []
         self._metas: list[dict] = []
-        self._faiss_index = None
+        
+        # Milvus store
+        self._use_milvus = use_milvus and MILVUS_AVAILABLE
+        self._milvus_store: MilvusStore | None = None
+        self._milvus_collection = milvus_collection or "finance_docs"
         
         if not use_api and SENTENCE_TRANSFORMERS_AVAILABLE:
             if auto_download:
                 self._download_and_load_model()
             else:
                 self._load_local_model()
+        
+        # Initialize Milvus if enabled
+        if self._use_milvus:
+            try:
+                self._milvus_store = MilvusStore(
+                    host=milvus_host,
+                    port=milvus_port,
+                    collection_name=self._milvus_collection,
+                )
+                log.info("Milvus store initialized: %s:%s/%s", 
+                        milvus_host or "localhost", 
+                        milvus_port or "19530",
+                        self._milvus_collection)
+            except Exception as e:
+                log.warning("Failed to initialize Milvus store: %s", e)
+                self._use_milvus = False
     
     def _download_and_load_model(self):
         """Download and load embedding model."""
         try:
             log.info(f"Downloading embedding model: {self.model_name}")
             self._model = SentenceTransformer(self.model_name)
-            log.info(f"Embedding model downloaded and loaded successfully")
+            self._embedding_dim = self._model.get_sentence_embedding_dimension()
+            log.info(f"Embedding model downloaded and loaded successfully (dim={self._embedding_dim})")
         except Exception as e:
             log.error(f"Failed to download embedding model: {e}")
             self._model = None
@@ -96,7 +131,8 @@ class EmbeddingSearch:
         try:
             log.info(f"Loading embedding model: {self.model_name}")
             self._model = SentenceTransformer(self.model_name)
-            log.info(f"Embedding model loaded successfully")
+            self._embedding_dim = self._model.get_sentence_embedding_dimension()
+            log.info(f"Embedding model loaded successfully (dim={self._embedding_dim})")
         except Exception as e:
             log.error(f"Failed to load embedding model: {e}")
             self._model = None
@@ -131,43 +167,57 @@ class EmbeddingSearch:
             log.warning("No documents to index")
             return
         
-        self._documents = documents
-        self._metas = metas or [{} for _ in documents]
+        metas = metas or [{} for _ in documents]
         
         # Compute embeddings
         log.info(f"Computing embeddings for {len(documents)} documents...")
-        self._embeddings = self._get_embeddings(documents)
+        embeddings = self._get_embeddings(documents)
         
-        # Build FAISS index if available
-        if FAISS_AVAILABLE and self._embeddings is not None:
-            self._build_faiss_index()
-        
-        log.info(f"Indexed {len(documents)} documents")
+        if self._use_milvus and self._milvus_store is not None:
+            try:
+                # Create collection if not exists
+                if not self._milvus_store.collection_exists():
+                    self._milvus_store.create_collection(dim=self._embedding_dim or embeddings.shape[1])
+                
+                # Extract source_kinds and symbols from metadata
+                source_kinds = [m.get("source_kind", "unknown") for m in metas]
+                symbols = [m.get("symbol", "") for m in metas]
+                
+                # Insert into Milvus
+                self._milvus_store.insert(
+                    texts=documents,
+                    embeddings=embeddings,
+                    metas=metas,
+                    source_kinds=source_kinds,
+                    symbols=symbols,
+                )
+                log.info(f"Indexed {len(documents)} documents in Milvus")
+            except Exception as e:
+                log.warning(f"Failed to index in Milvus: {e}. Falling back to in-memory.")
+                self._use_milvus = False
+                self._store_in_memory(documents, embeddings, metas)
+        else:
+            self._store_in_memory(documents, embeddings, metas)
     
-    def _build_faiss_index(self):
-        """Build FAISS index for fast similarity search."""
-        if not FAISS_AVAILABLE or self._embeddings is None:
-            return
-        
-        embedding_dim = self._embeddings.shape[1]
-        
-        # Use IndexFlatIP for cosine similarity (after normalization)
-        # or IndexFlatL2 for Euclidean distance
-        self._faiss_index = faiss.IndexFlatIP(embedding_dim)
-        
-        # Normalize embeddings for cosine similarity
-        faiss.normalize_L2(self._embeddings)
-        
-        # Add embeddings to index
-        self._faiss_index.add(self._embeddings)
-        
-        log.info(f"FAISS index built with {len(self._documents)} documents")
+    def _store_in_memory(
+        self,
+        documents: list[str],
+        embeddings: np.ndarray,
+        metas: list[dict],
+    ):
+        """Store documents in memory (fallback)."""
+        self._documents = documents
+        self._metas = metas
+        self._embeddings = embeddings
+        log.info(f"Indexed {len(documents)} documents in memory")
     
     def search(
         self,
         query: str,
         top_k: int = 10,
         filter_fn: callable | None = None,
+        source_kinds: list[str] | None = None,
+        symbols: list[str] | None = None,
     ) -> list[tuple[str, float, dict]]:
         """Search for similar documents.
         
@@ -175,57 +225,58 @@ class EmbeddingSearch:
             query: Search query
             top_k: Number of results to return
             filter_fn: Optional filter function (doc_text, meta) -> bool
+            source_kinds: Filter by source kinds (for Milvus)
+            symbols: Filter by stock symbols (for Milvus)
         
         Returns:
             List of (document, score, meta) tuples
         """
-        if self._embeddings is None or len(self._documents) == 0:
-            log.warning("No documents indexed")
-            return []
-        
         # Get query embedding
         query_embedding = self._get_embeddings([query])
         
-        # Search
-        if self._faiss_index is not None and FAISS_AVAILABLE:
-            # FAISS search
-            faiss.normalize_L2(query_embedding)
-            scores, indices = self._faiss_index.search(query_embedding, top_k * 2)
-            
-            results = []
-            for idx, score in zip(indices[0], scores[0]):
-                if idx < 0 or idx >= len(self._documents):
-                    continue
+        if self._use_milvus and self._milvus_store is not None:
+            try:
+                results = self._milvus_store.search(
+                    query_embedding=query_embedding[0],
+                    top_k=top_k,
+                    source_kinds=source_kinds,
+                    symbols=symbols,
+                )
                 
-                doc = self._documents[idx]
-                meta = self._metas[idx]
+                # Apply additional filter if provided
+                if filter_fn:
+                    results = [
+                        (doc, score, meta) 
+                        for doc, score, meta in results 
+                        if filter_fn(doc, meta)
+                    ]
                 
-                # Apply filter
-                if filter_fn is not None and not filter_fn(doc, meta):
-                    continue
-                
-                results.append((doc, float(score), meta))
-                
-                if len(results) >= top_k:
-                    break
-            
-            return results
+                return results[:top_k]
+            except Exception as e:
+                log.warning(f"Milvus search failed: {e}. Falling back to in-memory.")
+                return self._in_memory_search(query_embedding[0], top_k, filter_fn)
         else:
-            # Fallback to numpy cosine similarity
-            return self._numpy_search(query_embedding[0], top_k, filter_fn)
+            return self._in_memory_search(query_embedding[0], top_k, filter_fn)
     
-    def _numpy_search(
+    def _in_memory_search(
         self,
         query_embedding: np.ndarray,
         top_k: int,
         filter_fn: callable | None = None,
     ) -> list[tuple[str, float, dict]]:
         """Fallback search using numpy."""
+        if self._embeddings is None or len(self._documents) == 0:
+            log.warning("No documents indexed")
+            return []
+        
         # Normalize query
         query_norm = query_embedding / (np.linalg.norm(query_embedding) + 1e-8)
         
+        # Normalize embeddings
+        embeddings_norm = self._embeddings / (np.linalg.norm(self._embeddings, axis=1, keepdims=True) + 1e-8)
+        
         # Compute cosine similarities
-        similarities = np.dot(self._embeddings, query_norm)
+        similarities = np.dot(embeddings_norm, query_norm)
         
         # Get top-k indices
         top_indices = np.argsort(similarities)[::-1]
@@ -266,6 +317,12 @@ class EmbeddingSearch:
         Returns:
             List of (document, combined_score, meta) tuples
         """
+        if self._use_milvus and self._milvus_store is not None:
+            # For Milvus, we can't easily do hybrid with BM25 indices
+            # So we just return embedding search results
+            log.warning("Hybrid search with Milvus not fully supported. Using embedding only.")
+            return self.search(query, top_k=top_k)
+        
         if self._embeddings is None:
             # Fallback to BM25 only
             return [
@@ -311,7 +368,11 @@ class EmbeddingSearch:
         return results
     
     def save_index(self, path: Path):
-        """Save index to disk."""
+        """Save index to disk (only for in-memory mode)."""
+        if self._use_milvus:
+            log.info("Milvus index is persistent. No need to save.")
+            return
+        
         if self._embeddings is None:
             log.warning("No index to save")
             return
@@ -333,7 +394,11 @@ class EmbeddingSearch:
         log.info(f"Index saved to {path}")
     
     def load_index(self, path: Path):
-        """Load index from disk."""
+        """Load index from disk (only for in-memory mode)."""
+        if self._use_milvus:
+            log.info("Milvus index is persistent. No need to load.")
+            return
+        
         path = Path(path)
         
         # Load embeddings
@@ -346,11 +411,21 @@ class EmbeddingSearch:
             self._documents = data["documents"]
             self._metas = data["metas"]
         
-        # Rebuild FAISS index
-        if FAISS_AVAILABLE:
-            self._build_faiss_index()
-        
         log.info(f"Index loaded from {path}")
+    
+    def get_stats(self) -> dict:
+        """Get statistics about the search index."""
+        if self._use_milvus and self._milvus_store is not None:
+            try:
+                return self._milvus_store.get_stats()
+            except Exception as e:
+                log.warning("Failed to get Milvus stats: %s", e)
+        
+        return {
+            "mode": "in-memory",
+            "num_documents": len(self._documents),
+            "embedding_dim": self._embeddings.shape[1] if self._embeddings is not None else 0,
+        }
 
 
 def test_embedding_search():
@@ -391,7 +466,7 @@ def test_embedding_search():
         for doc, score, meta in results:
             print(f"  Score: {score:.4f} | {doc[:50]}... | {meta}")
     
-    print("\n✅ Embedding search test completed!")
+    print("\nEmbedding search test completed!")
 
 
 if __name__ == "__main__":

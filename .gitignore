@@ -16,3 +16,4 @@ outputs/*
 # But keep sample demo outputs
 !demos/**
 .github/instructions/wmt-copilot.instructions.md
+volumes
