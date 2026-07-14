@@ -34,7 +34,8 @@ dependencies = [
     # --- Retrieval / ranking ---
     "rank-bm25==0.2.2",
     "sentence-transformers>=2.2.0",
-    # --- Vector Database ---
+    "faiss-cpu>=1.7.0",
+    "transformers<4.40",
     "pymilvus>=2.4.0",
     # --- Storage / data ---
     "pandas>=2.2.0",
