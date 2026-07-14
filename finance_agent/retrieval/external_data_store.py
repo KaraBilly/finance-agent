@@ -36,10 +36,6 @@ _CHUNK_OVERLAP = 100
 _USE_EMBEDDING = True  # Enable embedding-based search
 _EMBEDDING_MODEL = "BAAI/bge-large-zh-v1.5"  # Chinese-optimized model
 
-# Milvus configuration
-_USE_MILVUS = True  # Enable Milvus vector store
-
-
 class ExternalDataStore:
     """Store for external market/financials/filings data with RAG retrieval."""
 
@@ -49,17 +45,20 @@ class ExternalDataStore:
         financials_dir: Path | None = None,
         filings_dir: Path | None = None,
         use_embedding: bool = _USE_EMBEDDING,
-        use_milvus: bool = _USE_MILVUS,
+        use_milvus: bool | None = None,
     ):
         from ..config import CONFIG
 
         self.market_dir = market_dir or CONFIG.external_market_dir or (CONFIG.data_dir / "market")
         self.financials_dir = financials_dir or CONFIG.external_financials_dir or (CONFIG.data_dir / "financials")
         self.filings_dir = filings_dir or CONFIG.external_filings_dir or (CONFIG.data_dir / "filings")
-        
+
         self.enabled = CONFIG.use_external_data
         self.use_embedding = use_embedding
-        self.use_milvus = use_milvus
+        # Read the Milvus toggle from CONFIG so users can turn it off via
+        # ``FA_USE_MILVUS=false`` without editing code. Explicit constructor
+        # arg still wins for tests / callers that need to force a value.
+        self.use_milvus = CONFIG.use_milvus if use_milvus is None else use_milvus
 
         # All documents: list of (text, metadata, source_kind)
         self._docs: list[tuple[str, dict[str, Any], str]] = []
@@ -465,22 +464,39 @@ class ExternalDataStore:
         if self.use_embedding and self._embedding_search is not None:
             try:
                 embedding_results = self._embedding_search.search(
-                    query, 
+                    query,
                     top_k=bm25_top,
                     source_kinds=source_kinds,
                     symbols=symbols,
                 )
-                # Merge with BM25 results
+                # Merge with BM25 results. Previously we only kept a Milvus
+                # hit if its exact text was also in the in-memory candidate
+                # list — which silently dropped everything from a persisted
+                # Milvus collection when in-memory _docs was empty (e.g., a
+                # fresh process that hasn't reloaded local files). Now we
+                # keep every hit, using the Milvus payload directly when
+                # the text isn't in memory.
                 seen_texts = {p[0] for p in pre}
-                for doc_text, score, meta in embedding_results:
-                    if doc_text not in seen_texts:
-                        # Find the original candidate
-                        for candidate in candidates:
-                            if candidate[0] == doc_text:
-                                pre.append(candidate)
-                                seen_texts.add(doc_text)
-                                break
-                log.info("Embedding search added %d results", len(pre) - len(top_idx))
+                added_from_milvus = 0
+                for doc_text, _score, meta in embedding_results:
+                    if not doc_text or doc_text in seen_texts:
+                        continue
+                    matched: tuple[str, dict, str] | None = None
+                    for candidate in candidates:
+                        if candidate[0] == doc_text:
+                            matched = candidate
+                            break
+                    if matched is not None:
+                        pre.append(matched)
+                    else:
+                        # Fall back to Milvus payload. MilvusStore.search
+                        # guarantees ``source_kind`` and ``symbol`` are set
+                        # in ``meta``.
+                        sk = meta.get("source_kind") or meta.get("sourceKind") or "unknown"
+                        pre.append((doc_text, dict(meta), sk))
+                    seen_texts.add(doc_text)
+                    added_from_milvus += 1
+                log.info("Embedding search added %d unique results", added_from_milvus)
             except Exception as e:
                 log.warning("Embedding search failed: %s", e)
 
