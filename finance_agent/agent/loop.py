@@ -261,30 +261,46 @@ class AgentLoop:
         providers = self.registry.for_market(market)
         trace["detected_market"] = market
 
-        # 2a. For US: hit real APIs (Finnhub).
-        #     For CN: skip API tools entirely and rely on RAG over local files.
-        #     If planner explicitly selects web, skip local RAG and go straight to web.
+        # 2a. For US: hit real APIs (Finnhub) for all planner-selected tools.
+        #     For CN: only ``web`` is a real network call; market/financials/filings
+        #     have no CN API impl and are answered via RAG over local files below.
+        #     Local RAG is skipped ONLY when the planner picked web *exclusively*.
         tools = plan_obj.get("tools", [])
         tool_names = [t.get("tool") if isinstance(t, dict) else t for t in tools]
-        use_web_only = "web" in tool_names
+        web_only_plan = bool(tool_names) and all(n == "web" for n in tool_names)
+        has_web = "web" in tool_names
+        has_non_web = any(n != "web" for n in tool_names)
 
-        if market == "cn" and use_web_only:
-            log.info("A-share detected, but planner selected web tool → skipping local RAG")
-            evs: list[Evidence] = []
-        elif market == "cn":
-            log.info("A-share detected, using external data only (no API calls)")
-            evs = []
+        if market == "cn":
+            # Run only the ``web`` tool through _run_tools — other CN tools have
+            # no direct provider and are handled by RAG in step 2b.
+            if has_web:
+                web_only_tools = [
+                    t for t in tools
+                    if (t.get("tool") if isinstance(t, dict) else t) == "web"
+                ]
+                evs: list[Evidence] = self._run_tools(web_only_tools, providers)
+                if has_non_web:
+                    log.info(
+                        "A-share detected, running web tool + local RAG for non-web tools %s",
+                        [n for n in tool_names if n != "web"],
+                    )
+                else:
+                    log.info("A-share detected, planner selected web-only → skipping local RAG")
+            else:
+                evs = []
+                log.info("A-share detected, using external data only (no API calls)")
         else:
             evs = self._run_tools(tools, providers)
 
         trace["evidence_count_from_tools"] = len(evs)
 
         # 2b. Retrieve from external data via RAG.
-        #     CN → primary evidence source (local files).
+        #     CN → primary evidence source (local files) unless plan is web-only.
         #     US → skip (API tools already provided authoritative data).
         try:
             external_kinds = self._infer_external_kinds(tools)
-            if market == "cn" and not use_web_only:
+            if market == "cn" and not web_only_plan:
                 rag_evs = self._retriever.retrieve(
                     question,
                     plan=plan_obj,
@@ -301,7 +317,7 @@ class AgentLoop:
                 if market != "cn":
                     log.info("US stock detected, skipping external data RAG (using API data)")
                 else:
-                    log.info("Web tool selected, skipping external data RAG")
+                    log.info("Web-only plan for A-share, skipping external data RAG")
         except Exception as e:
             log.warning("External data RAG failed: %s", e)
             trace["evidence_count_from_rag"] = 0

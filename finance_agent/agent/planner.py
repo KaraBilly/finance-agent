@@ -1,30 +1,67 @@
 """Planner — turns a natural-language question + user prefs into a ToolPlan.
 
-Uses doubao in JSON mode. Output schema:
-{
-  "intent":  "company_deep_dive" | "index_overview" | "general_web",
-  "entities": {"symbol": "AAPL", "name": "苹果"} | {},
-  "tools": [
-     {"tool": "market_us.index", "args": {"symbols": ["QQQ","SPY"], "years": 20}},
-     {"tool": "market_us.stock", "args": {"symbol": "AAPL", "lookback_days": 365}},
-     {"tool": "financials_us",   "args": {"symbol": "AAPL", "kinds": ["income","balance","cashflow"]}},
-     {"tool": "filings_us",      "args": {"symbol": "AAPL", "years_back": 2}},
-     {"tool": "web",             "args": {"queries": ["Apple 竞争 风险"]}}
-  ],
-  "answer_sections": ["Summary","Key Numbers","Risks","Evidence"]
-}
+Runs on doubao via a pydantic-ai :class:`Agent` with a strict
+:class:`ToolPlan` output schema, so the caller receives a validated object
+rather than a hand-parsed JSON blob.
+
+Exposed publicly:
+  * :class:`ToolPlan`, :class:`ToolCall`, :class:`ToolPlanIntent` — schemas
+  * :func:`plan` — the loop entry point (returns ``dict`` for back-compat)
+  * :func:`build_planner_agent` — factory used by tests / advanced callers to
+    inject their own model (``TestModel`` / ``FunctionModel``)
 """
 from __future__ import annotations
-import logging
-from typing import Any
 
-from ..capabilities.llm import LLMCapability, ChatMessage
+import logging
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field
+from pydantic_ai import Agent
+
+from ..capabilities.llm import LLMCapability
+from ..providers.llm_openai import OpenAICompatibleLLM
+from .pydantic_runtime import build_agent
 
 log = logging.getLogger(__name__)
 
-# Unified system prompt - market determined by semantic analysis of user question
+# ---------------------------------------------------------------------------
+# Output schema — validated by pydantic-ai on every call
+# ---------------------------------------------------------------------------
+
+ToolPlanIntent = Literal[
+    "company_deep_dive",
+    "index_overview",
+    "general_web",
+]
+
+ToolName = Literal[
+    "market.index",
+    "market.stock",
+    "financials",
+    "filings",
+    "web",
+]
+
+class ToolCall(BaseModel):
+    """A single tool invocation emitted by the planner."""
+
+    tool: ToolName
+    args: dict[str, Any] = Field(default_factory=dict)
+
+class ToolPlan(BaseModel):
+    """Full plan for a single user question."""
+
+    intent: ToolPlanIntent = "general_web"
+    entities: dict[str, Any] = Field(default_factory=dict)
+    tools: list[ToolCall] = Field(default_factory=list)
+    answer_sections: list[str] = Field(default_factory=lambda: ["Summary", "Evidence"])
+
+# ---------------------------------------------------------------------------
+# System prompt (identical intent to the pre-pydantic-ai version)
+# ---------------------------------------------------------------------------
+
 SYSTEM = """You are the planning module of a personal finance agent that supports both US and Chinese A-share markets.
-Given the user question and their stored preferences, output a JSON ToolPlan that
+Given the user question and their stored preferences, produce a ToolPlan that
 selects which tools to call and with what arguments. Available tools:
 
   market.index        args: {symbols:[str], years:int}    # index summaries (supports both US and A-share indices)
@@ -41,41 +78,60 @@ Rules:
 - If the question mentions liquidity/debt/cash flow, always include financials with the relevant statement.
 - If the question asks about competition/risk factors qualitatively, include web + filings.
 - If entities are unclear, still return a plan; put a web query to disambiguate.
-- User preferences (topics with weights) should influence tool selection AND `answer_sections`.
-- Return STRICT JSON only, no prose. Keys: intent, entities, tools, answer_sections.
+- User preferences (topics with weights) should influence tool selection AND answer_sections.
 """
 
+# ---------------------------------------------------------------------------
+# Agent factory + public entry point
+# ---------------------------------------------------------------------------
 
-def plan(model: LLMCapability, question: str, prefs: list[dict], 
-         history: list[dict[str, str]] | None = None) -> dict[str, Any]:
-    # Use unified system prompt - market determined by semantic analysis
-    prefs_str = "\n".join(f"- {p['topic']} (weight={p['weight']:.2f})" for p in prefs) or "(none)"
-    
-    # Build messages with optional conversation history
-    messages = [ChatMessage("system", SYSTEM)]
-    
-    # Add conversation history if available
+def build_planner_agent(llm: OpenAICompatibleLLM) -> Agent[None, ToolPlan]:
+    """Build the pydantic-ai agent used by :func:`plan`.
+
+    Split out so tests can swap in a ``TestModel`` via ``agent.override(...)``.
+    """
+    return build_agent(llm, output_type=ToolPlan, system_prompt=SYSTEM)
+
+def _format_user_prompt(question: str, prefs: list[dict],
+                        history: list[dict[str, str]] | None) -> str:
+    prefs_str = (
+        "\n".join(f"- {p['topic']} (weight={p['weight']:.2f})" for p in prefs)
+        or "(none)"
+    )
+    parts: list[str] = []
     if history:
-        for msg in history:
-            messages.append(ChatMessage(msg["role"], msg["content"]))
-    
-    user = f"User question:\n{question}\n\nUser preferences:\n{prefs_str}\n\nReturn ToolPlan JSON."
-    messages.append(ChatMessage("user", user))
-    
-    obj = model.chat_json(messages, temperature=0.1)
-    # minimal shape check
-    obj.setdefault("tools", [])
-    obj.setdefault("entities", {})
-    obj.setdefault("answer_sections", ["Summary", "Evidence"])
-    # Normalise tool entries — GPT-5.x tends to emit {"name": ...} while
-    # Doubao follows the prompt and emits {"tool": ...}. Downstream code
-    # expects "tool"/"args".
-    for t in obj["tools"]:
-        if "tool" not in t and "name" in t:
-            t["tool"] = t.pop("name")
-        if "tool" not in t and "tool_name" in t:
-            t["tool"] = t.pop("tool_name")
-        if "args" not in t and "arguments" in t:
-            t["args"] = t.pop("arguments")
-    log.info("plan: intent=%s tools=%s", obj.get("intent"), [t.get("tool") for t in obj["tools"]])
-    return obj
+        # Fold history into the user message so we don't have to smuggle
+        # multi-turn state through pydantic-ai's ``message_history`` — which
+        # would require converting our ChatMessage dicts into
+        # ``ModelMessage`` objects for every call.
+        hist_lines = [f"{m['role'].upper()}: {m['content']}" for m in history]
+        parts.append("Prior turns:\n" + "\n".join(hist_lines))
+    parts.append(f"User question:\n{question}")
+    parts.append(f"User preferences:\n{prefs_str}")
+    parts.append("Return a ToolPlan.")
+    return "\n\n".join(parts)
+
+def plan(model: LLMCapability, question: str, prefs: list[dict],
+         history: list[dict[str, str]] | None = None) -> dict[str, Any]:
+    """Produce a ToolPlan dict for the given question.
+
+    Returned as a plain ``dict`` (not the :class:`ToolPlan` instance itself) so
+    the surrounding :mod:`finance_agent.agent.loop` code — which treats the
+    plan as loose JSON — keeps working unchanged.
+    """
+    if not isinstance(model, OpenAICompatibleLLM):
+        raise TypeError(
+            "planner.plan requires an OpenAICompatibleLLM (Doubao / DeepSeek); "
+            f"got {type(model).__name__}"
+        )
+
+    agent = build_planner_agent(model)
+    prompt = _format_user_prompt(question, prefs, history)
+    result = agent.run_sync(prompt)
+    tp: ToolPlan = result.output
+    log.info(
+        "plan: intent=%s tools=%s",
+        tp.intent,
+        [t.tool for t in tp.tools],
+    )
+    return tp.model_dump()

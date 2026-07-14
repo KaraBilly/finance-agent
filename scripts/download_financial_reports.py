@@ -2,14 +2,13 @@
 # -*- coding: utf-8 -*-
 """
 财报下载脚本
-支持下载比亚迪、寒武纪、中际旭创、宁德时代四家公司的财报
-下载最近10年的年报、中报和季报
+支持下载比亚迪、中际旭创、宁德时代四家公司的财报
+下载最近1年的年报、中报和季报
 """
 
 import requests
 import os
 import re
-import json
 import time
 from datetime import datetime
 from urllib.parse import urljoin
@@ -88,7 +87,7 @@ def download_byd():
         print(f"  找到 {len(data['items'])} 条财报记录")
         
         current_year = datetime.now().year
-        ten_years_ago = current_year - 10
+        ten_years_ago = current_year - 1
         downloaded = 0
         
         for item in data["items"]:
@@ -146,71 +145,6 @@ def download_byd():
     except Exception as e:
         print(f"  获取比亚迪财报列表失败: {e}")
 
-# ==================== 寒武纪 ====================
-def download_cambricon():
-    """下载寒武纪财报"""
-    print("\n=== 开始下载寒武纪财报 ===")
-    company_dir = ensure_dir(os.path.join(DOWNLOAD_DIR, "寒武纪"))
-    
-    # 寒武纪的财报数据来自上交所
-    # 通过上交所API获取
-    sse_url = "https://query.sse.com.cn/commonQuery.do"
-    params = {
-        "sqlId": "COMMON_SSE_SCSJ_CJXX_GPJBZL_C",
-        "productId": "688256",  # 寒武纪股票代码
-        "isPagination": "true",
-        "pageHelp.pageSize": "25",
-        "pageHelp.pageNo": "1",
-        "pageHelp.beginPage": "1",
-        "pageHelp.endPage": "5",
-        "_": str(int(time.time() * 1000))
-    }
-    
-    headers = {
-        **HEADERS,
-        "Referer": "https://www.sse.com.cn/"
-    }
-    
-    try:
-        response = requests.get(sse_url, params=params, headers=headers, timeout=TIMEOUT)
-        response.raise_for_status()
-        data = response.json()
-        
-        if "result" in data:
-            downloaded = 0
-            for item in data["result"]:
-                try:
-                    title = item.get("TITLE", "")
-                    pdf_url = item.get("URL", "")
-                    
-                    if pdf_url and title:
-                        if not pdf_url.startswith("http"):
-                            pdf_url = f"https://www.sse.com.cn{pdf_url}"
-                        
-                        safe_title = re.sub(r'[\\/*?":<>|]', '_', title)
-                        filename = f"{safe_title}.pdf"
-                        filepath = os.path.join(company_dir, filename)
-                        
-                        if not os.path.exists(filepath):
-                            print(f"  下载: {title}")
-                            if download_file(pdf_url, filepath):
-                                downloaded += 1
-                            time.sleep(1)
-                        else:
-                            print(f"  已存在: {title}")
-                            
-                except Exception as e:
-                    print(f"  处理寒武纪财报时出错: {e}")
-                    continue
-            
-            print(f"  共下载 {downloaded} 个寒武纪财报文件")
-        else:
-            print("  未获取到寒武纪财报数据")
-                    
-    except Exception as e:
-        print(f"  获取寒武纪财报失败: {e}")
-        print("  寒武纪财报需要通过上交所网站手动下载")
-
 # ==================== 中际旭创 ====================
 def download_innolight():
     """下载中际旭创财报"""
@@ -220,7 +154,7 @@ def download_innolight():
     base_url = "https://www.zj-innolight.com/index/index/inv2.html"
     page = 1
     downloaded_count = 0
-    max_pages = 20  # 最多爬20页
+    max_pages = 1  # 最多爬1页
     
     while page <= max_pages:
         try:
@@ -300,8 +234,8 @@ def download_catl():
     current_year = datetime.now().year
     downloaded_count = 0
     
-    # 获取最近10年的财报
-    for year in range(current_year, current_year - 10, -1):
+    # 获取最近1年的财报
+    for year in range(current_year, current_year - 1, -1):
         try:
             data = {
                 "index": "1",
@@ -366,7 +300,6 @@ def main():
     
     # 下载各公司财报
     download_byd()
-    download_cambricon()
     download_innolight()
     download_catl()
     
