@@ -181,3 +181,67 @@ class TestSearch:
         )
         assert len(results) == 1
         assert results[0][2]["symbol"] == "MSFT"
+
+
+# ---------------------------------------------------------------- readiness
+
+class TestIsReady:
+    """Regression guards for the ``No embedding model available`` failure.
+
+    When sentence-transformers isn't installed AND ``use_api=False``, the
+    old code left ``_use_milvus=True`` and blew up inside ``_get_embeddings``
+    on the first ``search()`` call. Now the constructor should detect the
+    missing embedder, disable Milvus, and ``search``/``index_documents``
+    should early-return without raising.
+    """
+
+    def test_is_ready_false_when_no_model_and_no_api(self):
+        # Simulate: sentence-transformers missing, pymilvus available.
+        with patch.object(es_mod, "SENTENCE_TRANSFORMERS_AVAILABLE", False):
+            with patch.object(es_mod, "MILVUS_AVAILABLE", True):
+                with patch.object(es_mod, "MilvusStore", return_value=MagicMock()):
+                    search = EmbeddingSearch(use_milvus=True, auto_download=False)
+        assert search.is_ready is False
+        # Milvus path must be turned off — otherwise every search would
+        # hit the raise inside _get_embeddings.
+        assert search._use_milvus is False
+        assert search._milvus_store is None
+
+    def test_is_ready_true_with_api(self):
+        search = EmbeddingSearch(use_api=True, use_milvus=False, auto_download=False)
+        assert search.is_ready is True
+
+    def test_is_ready_true_with_local_model(self):
+        search = _make_search(use_milvus=False)
+        # helper installs a mock model.
+        assert search.is_ready is True
+
+    def test_search_returns_empty_when_not_ready(self):
+        with patch.object(es_mod, "SENTENCE_TRANSFORMERS_AVAILABLE", False):
+            with patch.object(es_mod, "MILVUS_AVAILABLE", False):
+                search = EmbeddingSearch(use_milvus=False, auto_download=False)
+        # search must NOT raise "No embedding model available" — return [].
+        assert search.search("anything", top_k=5) == []
+
+    def test_index_documents_noop_when_not_ready(self):
+        with patch.object(es_mod, "SENTENCE_TRANSFORMERS_AVAILABLE", False):
+            with patch.object(es_mod, "MILVUS_AVAILABLE", False):
+                search = EmbeddingSearch(use_milvus=False, auto_download=False)
+        # Must not raise, must not populate the in-memory arrays.
+        search.index_documents(["doc"], [{"x": 1}])
+        assert search._documents == []
+        assert search._embeddings is None
+
+    def test_model_load_failure_leaves_search_not_ready(self):
+        # Simulate sentence-transformers installed but the download failed.
+        fake_st = MagicMock(side_effect=RuntimeError("hf network"))
+        with patch.object(es_mod, "SENTENCE_TRANSFORMERS_AVAILABLE", True):
+            # ``SentenceTransformer`` symbol may not exist on the module
+            # when the real import failed (this venv doesn't have it), so
+            # inject it with ``create=True``.
+            with patch.object(es_mod, "SentenceTransformer", fake_st, create=True):
+                with patch.object(es_mod, "MILVUS_AVAILABLE", True):
+                    with patch.object(es_mod, "MilvusStore", return_value=MagicMock()):
+                        search = EmbeddingSearch(use_milvus=True, auto_download=True)
+        assert search.is_ready is False
+        assert search._use_milvus is False

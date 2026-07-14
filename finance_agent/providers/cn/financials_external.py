@@ -1,26 +1,29 @@
-"""A-share external financials provider — uses local files only, no API calls.
+"""A-share external financials provider — RAG-backed, no direct file I/O.
 
-This provider replaces the Eastmoney API-based provider for A-share financial data.
-It reads pre-prepared financial reports from local files and serves them through
-the FinancialsCapability interface.
+This provider satisfies :class:`FinancialsCapability` by querying the shared
+:class:`ExternalDataStore` (BM25 + Milvus embedding retrieval) instead of
+scanning the ``data/financials/`` directory itself. The RAG store already
+loads and indexes those same files, so serving through it removes duplicated
+I/O + parsing and lets financials benefit from semantic ranking.
 
-Expected data structure:
-  data/financials/
-    ├── 000001_income.csv
-    ├── 000001_balance.csv
-    ├── 000001_cashflow.csv
-    └── ...
+Note:
+    ``get_statement`` returns a text-only DataFrame because RAG chunks are
+    unstructured text. The main consumer (``agent/loop.py``) only uses
+    ``collect_all`` / ``summarize_statement``, which return ``Evidence``
+    objects and are unaffected.
 """
 from __future__ import annotations
 
 import logging
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pandas as pd
 
 from ...capabilities.base import Evidence
 from ...capabilities.financials import FinancialsCapability, StatementType
-from ...config import CONFIG
+
+if TYPE_CHECKING:
+    from ...retrieval.external_data_store import ExternalDataStore
 
 log = logging.getLogger(__name__)
 
@@ -30,134 +33,74 @@ _STATEMENT_ZH: dict[StatementType, str] = {
     "cashflow": "现金流量表",
 }
 
-# Common column mappings for Chinese financial statements
-_COL_MAP = {
-    "income": {
-        "报告期": "REPORT_DATE",
-        "营业总收入": "TOTAL_OPERATE_INCOME",
-        "营业收入": "TOTAL_OPERATE_INCOME",
-        "营业利润": "OPERATE_PROFIT",
-        "利润总额": "TOTAL_PROFIT",
-        "净利润": "NETPROFIT",
-        "归属于母公司股东的净利润": "PARENT_NETPROFIT",
-        "基本每股收益": "BPS",
-        "稀释每股收益": "DILUTED_EPS",
-    },
-    "balance": {
-        "报告期": "REPORT_DATE",
-        "资产总计": "TOTAL_ASSETS",
-        "负债合计": "TOTAL_LIABILITIES",
-        "股东权益合计": "TOTAL_EQUITY",
-        "归属于母公司股东权益": "PARENT_EQUITY",
-        "货币资金": "MONEY_FUNDS",
-        "应收账款": "ACCOUNTS_RECEIVABLE",
-        "存货": "INVENTORY",
-    },
-    "cashflow": {
-        "报告期": "REPORT_DATE",
-        "经营活动产生的现金流量净额": "NET_CASH_FLOWS_OPERATE",
-        "投资活动产生的现金流量净额": "NET_CASH_FLOWS_INVEST",
-        "筹资活动产生的现金流量净额": "NET_CASH_FLOWS_FINANCE",
-        "现金及现金等价物净增加额": "NET_INCREASE_CASH",
-    },
+# Query hints per statement type — mixed CN + EN so BM25 and embedding
+# retrievers can both latch onto them regardless of the underlying chunk
+# language.
+_STATEMENT_QUERY_KEYWORDS: dict[StatementType, str] = {
+    "income": "利润表 营业收入 净利润 income statement revenue net profit",
+    "balance": "资产负债表 总资产 总负债 股东权益 balance sheet total assets liabilities equity",
+    "cashflow": "现金流量表 经营活动 投资活动 筹资活动 cash flow operating investing financing",
 }
 
-
 class ExternalAshareFinancialsProvider(FinancialsCapability):
-    """A-share financials provider using local files only."""
+    """A-share financials provider backed by the RAG :class:`ExternalDataStore`.
 
-    def __init__(self, data_dir: Path | None = None):
-        self.data_dir = data_dir or CONFIG.external_financials_dir or (CONFIG.data_dir / "financials")
-        self._cache: dict[str, pd.DataFrame] = {}
+    Args:
+        store: Optional pre-built store to share with other components (e.g.
+            the :class:`UnifiedRetriever`). If ``None`` a private store is
+            lazily created on first use.
+    """
 
-    # ------------------------------------------------------------------ helpers
+    def __init__(self, store: "ExternalDataStore | None" = None):
+        self._store = store
 
-    def _find_file(self, symbol: str, statement_type: StatementType) -> Path | None:
-        """Find financial data file for a symbol and statement type."""
-        if not self.data_dir.exists():
-            return None
+    # ---------------------------------------------------------- store access
 
-        # Map statement type to common file name patterns
-        type_patterns = {
-            "income": ["income", "利润表", "pl", "profit"],
-            "balance": ["balance", "资产负债表", "bs", "balancesheet"],
-            "cashflow": ["cashflow", "现金流量表", "cf", "cash"],
-        }
+    def _get_store(self) -> "ExternalDataStore":
+        """Lazily construct the RAG store when first needed."""
+        if self._store is None:
+            # Deferred import — the retrieval layer pulls in pymilvus /
+            # sentence-transformers which we don't want on import of this
+            # module (registry construction path).
+            from ...retrieval.external_data_store import get_shared_external_store
 
-        patterns = type_patterns.get(statement_type, [statement_type])
+            # Reuse the process-wide singleton so the unified retriever and
+            # this provider share one loaded corpus + Milvus collection.
+            self._store = get_shared_external_store()
+        return self._store
 
-        for pattern in patterns:
-            # Try exact match
-            file_path = self.data_dir / f"{symbol}_{pattern}.csv"
-            if file_path.exists():
-                return file_path
+    def _query_rag(
+        self,
+        symbol: str,
+        statement_type: StatementType,
+        *,
+        periods: int,
+    ) -> list[Evidence]:
+        """Run one targeted RAG query for a given (symbol, statement_type)."""
+        keywords = _STATEMENT_QUERY_KEYWORDS.get(statement_type, statement_type)
+        zh = _STATEMENT_ZH.get(statement_type, statement_type)
+        query = f"{symbol} {zh} {keywords} 最近{periods}期"
 
-            # Try in subdirectories
-            for subdir in self.data_dir.rglob("*"):
-                if subdir.is_dir():
-                    file_path = subdir / f"{symbol}_{pattern}.csv"
-                    if file_path.exists():
-                        return file_path
-
-            # Try with Chinese name
-            for f in self.data_dir.rglob(f"{symbol}_*"):
-                if pattern.lower() in f.stem.lower():
-                    return f
-            
-            # Try in subdirectories with Chinese name
-            for subdir in self.data_dir.rglob("*"):
-                if subdir.is_dir():
-                    for f in subdir.rglob(f"{symbol}_*"):
-                        if pattern.lower() in f.stem.lower():
-                            return f
-
-        return None
-
-    def _load_data(self, symbol: str, statement_type: StatementType) -> pd.DataFrame:
-        """Load financial data from file, with caching."""
-        cache_key = f"{symbol}_{statement_type}"
-        if cache_key in self._cache:
-            return self._cache[cache_key]
-
-        file_path = self._find_file(symbol, statement_type)
-        if not file_path:
-            log.warning("No financial data file found for %s/%s", symbol, statement_type)
-            return pd.DataFrame()
+        # ``final_top`` is a rough upper bound on how many chunks a single
+        # statement request may return; we don't know a-priori how many
+        # chunks the store produced per period.
+        top_n = max(periods, 3)
 
         try:
-            df = pd.read_csv(file_path)
-        except Exception:
-            try:
-                df = pd.read_csv(file_path, encoding="gbk")
-            except Exception as e:
-                log.warning("Failed to read %s: %s", file_path, e)
-                return pd.DataFrame()
+            return self._get_store().search(
+                query,
+                source_kinds=["financials"],
+                symbols=[symbol],
+                bm25_top=max(top_n * 3, 12),
+                final_top=top_n,
+            )
+        except Exception as e:
+            log.warning(
+                "RAG query failed for %s/%s: %s", symbol, statement_type, e
+            )
+            return []
 
-        # Standardize columns
-        df = self._standardize_columns(df, statement_type)
-        self._cache[cache_key] = df
-        return df
-
-    def _standardize_columns(self, df: pd.DataFrame, statement_type: StatementType) -> pd.DataFrame:
-        """Standardize column names."""
-        if df.empty:
-            return df
-
-        col_map = _COL_MAP.get(statement_type, {})
-        if col_map:
-            # Try to map columns
-            new_cols = {}
-            for col in df.columns:
-                col_clean = col.strip()
-                if col_clean in col_map:
-                    new_cols[col] = col_map[col_clean]
-
-            if new_cols:
-                df = df.rename(columns=new_cols)
-
-        return df
-
-    # ------------------------------------------------------------- capabilities
+    # ------------------------------------------------------------ capabilities
 
     def get_statement(
         self,
@@ -166,16 +109,25 @@ class ExternalAshareFinancialsProvider(FinancialsCapability):
         *,
         periods: int = 3,
     ) -> pd.DataFrame:
-        """Get a financial statement from local files."""
-        df = self._load_data(symbol, statement_type)
-        if df.empty:
-            return df
+        """Return a text-only DataFrame of matching RAG chunks.
 
-        # Sort by report date if available
-        if "REPORT_DATE" in df.columns:
-            df = df.sort_values("REPORT_DATE", ascending=False)
-
-        return df.head(periods).reset_index(drop=True)
+        The abstract :class:`FinancialsCapability` interface promises a
+        DataFrame, but the RAG store persists unstructured chunks — there is
+        no structured schema to project. We return one row per chunk with a
+        few informative columns so callers that iterate can still consume
+        something. In practice the agent loop uses ``collect_all`` /
+        ``summarize_statement`` and never touches this method.
+        """
+        results = self._query_rag(symbol, statement_type, periods=periods)
+        if not results:
+            return pd.DataFrame()
+        return pd.DataFrame(
+            {
+                "text": [ev.text for ev in results],
+                "title": [ev.title for ev in results],
+                "publisher": [ev.publisher for ev in results],
+            }
+        )
 
     def summarize_statement(
         self,
@@ -184,24 +136,31 @@ class ExternalAshareFinancialsProvider(FinancialsCapability):
         *,
         periods: int = 3,
     ) -> Evidence:
-        """Produce a Markdown summary of a financial statement."""
-        df = self.get_statement(symbol, statement_type, periods=periods)
-        if df is None or df.empty:
-            raise RuntimeError(f"No {statement_type} data for {symbol}. Please ensure data file exists in {self.data_dir}")
+        """Return the top matching RAG chunk as a single Evidence."""
+        results = self._query_rag(symbol, statement_type, periods=periods)
+        if not results:
+            raise RuntimeError(
+                f"No {statement_type} data for {symbol} in RAG store. "
+                f"Ensure the financials directory is loaded and indexed."
+            )
 
-        zh_name = _STATEMENT_ZH[statement_type]
+        top = results[0]
+        zh = _STATEMENT_ZH.get(statement_type, statement_type)
 
-        # Create markdown table
-        md = f"**{symbol} {zh_name} — 最近 {len(df)} 期 (外挂数据)**\n\n"
-        md += df.to_markdown(index=False)
+        # Wrap the RAG evidence with a statement-typed title/meta so the
+        # synthesizer knows which statement each chunk belongs to.
+        meta = dict(top.meta or {})
+        meta.setdefault("symbol", symbol)
+        meta["kind"] = statement_type
+        meta["periods"] = int(periods)
 
         return Evidence(
-            text=md,
+            text=top.text,
             source_kind="financials",
-            url=None,
-            title=f"{symbol} {zh_name} (外挂数据)",
-            publisher="external_data",
-            meta={"symbol": symbol, "kind": statement_type, "periods": int(len(df))},
+            url=top.url,
+            title=f"{symbol} {zh} (RAG)",
+            publisher=top.publisher or "external_data",
+            meta=meta,
         )
 
     def collect_all(
@@ -211,7 +170,12 @@ class ExternalAshareFinancialsProvider(FinancialsCapability):
         statement_types: list[StatementType] | None = None,
         periods: int = 3,
     ) -> list[Evidence]:
-        """Collect summaries for multiple statement types."""
+        """Collect RAG chunks for multiple statement types.
+
+        For each requested statement type we run one RAG query and keep the
+        top hit — this mirrors the semantic granularity the caller expects
+        (one Evidence per statement type).
+        """
         types = statement_types or ["income", "balance", "cashflow"]
         out: list[Evidence] = []
         for t in types:
@@ -219,5 +183,7 @@ class ExternalAshareFinancialsProvider(FinancialsCapability):
                 ev = self.summarize_statement(symbol, t, periods=periods)
                 out.append(ev)
             except Exception as e:
+                # A missing statement type shouldn't sink the whole call —
+                # the planner may still get useful data from the other two.
                 log.warning("Financial %s/%s failed: %s", symbol, t, e)
         return out

@@ -76,8 +76,21 @@ class ExternalDataStore:
                     milvus_port=getattr(CONFIG, 'milvus_port', None),
                     milvus_collection=getattr(CONFIG, 'milvus_collection', None),
                 )
-                log.info("Embedding search initialized with model: %s (Milvus: %s)", 
-                        _EMBEDDING_MODEL, self.use_milvus)
+                # If the embedder failed to load (sentence-transformers not
+                # installed, model download failure, etc.), turn off the
+                # embedding path entirely so ``search`` doesn't spend every
+                # call on a try/except that logs a misleading "Milvus search
+                # failed" line.
+                if not getattr(self._embedding_search, "is_ready", True):
+                    log.warning(
+                        "Embedding search disabled: embedder not ready. "
+                        "Install with: pip install 'sentence-transformers>=2.2.0'"
+                    )
+                    self.use_embedding = False
+                    self._embedding_search = None
+                else:
+                    log.info("Embedding search initialized with model: %s (Milvus: %s)",
+                            _EMBEDDING_MODEL, self.use_milvus)
             except Exception as e:
                 log.warning("Failed to initialize embedding search: %s", e)
                 self.use_embedding = False
@@ -498,7 +511,14 @@ class ExternalDataStore:
                     added_from_milvus += 1
                 log.info("Embedding search added %d unique results", added_from_milvus)
             except Exception as e:
-                log.warning("Embedding search failed: %s", e)
+                # This branch covers Milvus network errors AND embedder
+                # failures — log both possibilities so users know what to
+                # check.
+                log.warning(
+                    "Embedding/Milvus search failed: %s "
+                    "(check Milvus connectivity and sentence-transformers install)",
+                    e,
+                )
 
         # LLM rerank
         if reranker is not None and pre:
@@ -552,3 +572,28 @@ class ExternalDataStore:
                 pass
         
         return stats
+
+# ---------------------------------------------------------- shared instance
+
+# Module-level singleton so callers that need the RAG store (unified
+# retriever, RAG-backed financials provider, etc.) reuse the SAME loaded
+# corpus + Milvus collection instead of each spinning up their own — which
+# would re-parse every file and double-insert into Milvus.
+_SHARED_STORE: "ExternalDataStore | None" = None
+
+def get_shared_external_store() -> "ExternalDataStore":
+    """Return a process-wide :class:`ExternalDataStore` singleton.
+
+    First call builds the store with default (CONFIG-derived) settings.
+    Subsequent calls return the same instance. Tests can reset it via
+    :func:`reset_shared_external_store`.
+    """
+    global _SHARED_STORE
+    if _SHARED_STORE is None:
+        _SHARED_STORE = ExternalDataStore()
+    return _SHARED_STORE
+
+def reset_shared_external_store() -> None:
+    """Clear the shared store (test helper)."""
+    global _SHARED_STORE
+    _SHARED_STORE = None

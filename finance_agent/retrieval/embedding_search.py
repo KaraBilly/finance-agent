@@ -37,7 +37,6 @@ except ImportError:
     MILVUS_AVAILABLE = False
     log.warning("pymilvus not installed. Will use numpy for similarity search.")
 
-
 class EmbeddingSearch:
     """Embedding-based semantic search using Milvus vector database.
     
@@ -114,6 +113,36 @@ class EmbeddingSearch:
             except Exception as e:
                 log.warning("Failed to initialize Milvus store: %s", e)
                 self._use_milvus = False
+
+        # Milvus without an embedder is useless — we can't turn queries into
+        # vectors. Disable the Milvus path and print an actionable message so
+        # the caller doesn't spend every ``search()`` call on a try/except.
+        if not self.is_ready:
+            if self._use_milvus:
+                log.warning(
+                    "Embedding model unavailable — disabling Milvus path. "
+                    "Install with: pip install 'sentence-transformers>=2.2.0' "
+                    "(or set use_api=True and configure an API key)."
+                )
+                self._use_milvus = False
+                self._milvus_store = None
+            else:
+                log.warning(
+                    "Embedding model unavailable. Semantic search will be a "
+                    "no-op until sentence-transformers is installed or use_api "
+                    "is enabled."
+                )
+
+    @property
+    def is_ready(self) -> bool:
+        """Whether this instance can actually turn text into embeddings.
+
+        Milvus / in-memory paths are useless without an embedder, so callers
+        should short-circuit when this is False rather than invoke ``search``
+        and catch the resulting ``RuntimeError``.
+        """
+        return bool(self.use_api or self._model is not None)
+
     
     def _download_and_load_model(self):
         """Download and load embedding model."""
@@ -166,7 +195,13 @@ class EmbeddingSearch:
         if not documents:
             log.warning("No documents to index")
             return
-        
+
+        if not self.is_ready:
+            # Early-return with a clear reason instead of raising deep inside
+            # ``_get_embeddings``; keeps upstream logs meaningful.
+            log.warning("index_documents skipped: no embedding model available")
+            return
+
         metas = metas or [{} for _ in documents]
         
         # Compute embeddings
@@ -231,6 +266,12 @@ class EmbeddingSearch:
         Returns:
             List of (document, score, meta) tuples
         """
+        if not self.is_ready:
+            # No embedder means no vector search — return empty so the caller
+            # can fall back to BM25/other retrievers rather than crashing.
+            log.debug("search skipped: no embedding model available")
+            return []
+
         # Get query embedding
         query_embedding = self._get_embeddings([query])
         
@@ -427,7 +468,6 @@ class EmbeddingSearch:
             "embedding_dim": self._embeddings.shape[1] if self._embeddings is not None else 0,
         }
 
-
 def test_embedding_search():
     """Test embedding search functionality."""
     print("Testing Embedding Search...")
@@ -467,7 +507,6 @@ def test_embedding_search():
             print(f"  Score: {score:.4f} | {doc[:50]}... | {meta}")
     
     print("\nEmbedding search test completed!")
-
 
 if __name__ == "__main__":
     test_embedding_search()

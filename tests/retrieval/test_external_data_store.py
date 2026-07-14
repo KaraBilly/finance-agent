@@ -156,3 +156,54 @@ class TestSearchMergesMilvusHits:
         # BM25 results must still come back even if Milvus search dies.
         assert len(evidences) == 1
         assert evidences[0].text == "local"
+
+
+class TestEmbedderReadinessGate:
+    """Regression: when the embedder isn't ready (sentence-transformers not
+    installed, model download failed), ``ExternalDataStore.__init__`` must
+    disable ``use_embedding`` instead of leaving a broken embedder in place
+    that would raise ``No embedding model available`` on every search.
+    """
+
+    def test_unready_embedder_disables_embedding_path(self):
+        with patch("finance_agent.config.CONFIG") as cfg:
+            cfg.use_milvus = False
+            cfg.use_external_data = False
+            cfg.external_market_dir = None
+            cfg.external_financials_dir = None
+            cfg.external_filings_dir = None
+            cfg.data_dir = MagicMock()
+
+            # Return an EmbeddingSearch look-alike that reports is_ready=False.
+            fake_emb = MagicMock()
+            fake_emb.is_ready = False
+            with patch(
+                "finance_agent.retrieval.embedding_search.EmbeddingSearch",
+                return_value=fake_emb,
+            ):
+                store = ExternalDataStore(use_embedding=True)
+
+        # Broken embedder must be dropped so search() doesn't hit the
+        # "No embedding model available" RuntimeError on every call.
+        assert store.use_embedding is False
+        assert store._embedding_search is None
+
+    def test_ready_embedder_is_retained(self):
+        with patch("finance_agent.config.CONFIG") as cfg:
+            cfg.use_milvus = False
+            cfg.use_external_data = False
+            cfg.external_market_dir = None
+            cfg.external_financials_dir = None
+            cfg.external_filings_dir = None
+            cfg.data_dir = MagicMock()
+
+            fake_emb = MagicMock()
+            fake_emb.is_ready = True
+            with patch(
+                "finance_agent.retrieval.embedding_search.EmbeddingSearch",
+                return_value=fake_emb,
+            ):
+                store = ExternalDataStore(use_embedding=True)
+
+        assert store.use_embedding is True
+        assert store._embedding_search is fake_emb
