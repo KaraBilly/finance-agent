@@ -34,7 +34,11 @@ _CHUNK_OVERLAP = 100
 
 # Embedding configuration
 _USE_EMBEDDING = True  # Enable embedding-based search
-_EMBEDDING_MODEL = "BAAI/bge-large-zh-v1.5"  # Chinese-optimized model
+# ``FA_EMBEDDING_MODEL_PATH`` lets air-gapped/CN environments point at a
+# locally-downloaded model directory (e.g. ``~/.cache/huggingface/hub/models--BAAI--bge-large-zh-v1.5``
+# populated by hand) so we don't try to fetch from huggingface.co.
+import os as _os
+_EMBEDDING_MODEL = _os.getenv("FA_EMBEDDING_MODEL_PATH") or "BAAI/bge-large-zh-v1.5"
 
 class ExternalDataStore:
     """Store for external market/financials/filings data with RAG retrieval."""
@@ -149,18 +153,60 @@ class ExternalDataStore:
             self._embedding_search = None
 
     def _build_embedding_index(self):
-        """Build embedding index for semantic search."""
+        """Build embedding index for semantic search.
+
+        Milvus is a persistent store, so once ``scripts/import_to_milvus.py``
+        (or a previous run of this process) has populated the collection we
+        can skip both the embedding computation AND the re-insert on subsequent
+        starts. Set ``FA_FORCE_REEMBED=1`` to force a rebuild (e.g. after
+        changing the embedding model or chunking strategy).
+        """
         if not self._docs:
             return
-        
+
         self._ensure_embedding_search()
         if self._embedding_search is None:
             return
-        
+
+        # Fast path: reuse an already-populated Milvus collection.
+        force = _os.getenv("FA_FORCE_REEMBED", "").lower() in ("1", "true", "yes")
+        emb = self._embedding_search
+        milvus = getattr(emb, "_milvus_store", None)
+        if (
+            not force
+            and getattr(emb, "_use_milvus", False)
+            and milvus is not None
+        ):
+            try:
+                if milvus.collection_exists():
+                    existing = milvus.get_stats().get("num_entities", 0)
+                    if existing >= len(self._docs):
+                        log.info(
+                            "Skipping embedding index build: Milvus collection "
+                            "'%s' already has %d entities (>= %d local chunks). "
+                            "Set FA_FORCE_REEMBED=1 to rebuild.",
+                            milvus.collection_name,
+                            existing,
+                            len(self._docs),
+                        )
+                        return
+                    log.info(
+                        "Milvus collection '%s' has %d entities but %d local "
+                        "chunks were loaded; rebuilding index.",
+                        milvus.collection_name,
+                        existing,
+                        len(self._docs),
+                    )
+            except Exception as e:
+                log.warning(
+                    "Milvus population check failed (%s); will (re)build index.",
+                    e,
+                )
+
         log.info("Building embedding index...")
         texts = [d[0] for d in self._docs]
         metas = [d[1] for d in self._docs]
-        
+
         self._embedding_search.index_documents(texts, metas)
         log.info("Embedding index built successfully")
 
