@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -44,6 +45,12 @@ log = logging.getLogger(__name__)
 _MAX_WEB_QUERIES_PER_PLAN = 3
 _MAX_EVIDENCE_TOTAL = 24
 _MAX_HISTORY_TURNS = 10
+
+# Concurrency for tool dispatch and side-tasks. Tool calls are almost
+# entirely network-bound (Finnhub / Tavily / Trafilatura) so a small thread
+# pool cuts wall time roughly linearly. 4 workers is enough for the
+# typical planner output (≤ 5 tools per turn).
+_TOOL_CONCURRENCY = 4
 
 # Words that look like US tickers (1–5 uppercase letters) but are actually
 # common finance/regulatory acronyms. Used to guard ``_infer_market`` from
@@ -110,6 +117,11 @@ class AgentLoop:
     def _run_tools(self, tool_calls: list[dict], providers: MarketProviders) -> list[Evidence]:
         """Execute planner-emitted tool calls against a market-specific bundle.
 
+        Tool calls run in parallel via a thread pool: they're all HTTP-bound
+        (Finnhub / Tavily / Trafilatura) so serial execution wasted the wall
+        time of every call after the first. Order is preserved so the
+        resulting evidence list is deterministic across runs.
+
         Providers are passed in explicitly (rather than looked up on ``self``)
         so the same helper works for either market.
         """
@@ -117,12 +129,12 @@ class AgentLoop:
         financials = providers.financials
         filings = providers.filings
 
-        evs: list[Evidence] = []
-        for t in tool_calls:
+        def _dispatch(t: dict) -> list[Evidence]:
             # Accept either {"tool": ...} or {"name": ...} — different LLMs
             # (Doubao vs GPT-5.x) prefer different keys despite the same prompt.
             name = t.get("tool") or t.get("name") or ""
             args = t.get("args") or t.get("arguments") or {}
+            local: list[Evidence] = []
             try:
                 if name == "market.index":
                     symbols = args.get("symbols") or list(market_data.list_available_indices().keys())[:3]
@@ -130,7 +142,7 @@ class AgentLoop:
                     for sym in symbols:
                         try:
                             ev = market_data.summarize_index(sym, lookback_years=years)
-                            evs.append(self._storage.register_evidence(ev))
+                            local.append(self._storage.register_evidence(ev))
                         except Exception as e:
                             log.warning("summarize_index(%s) failed: %s", sym, e)
 
@@ -138,7 +150,7 @@ class AgentLoop:
                     sym = str(args.get("symbol", "")).strip()
                     if _is_safe_symbol(sym):
                         ev = market_data.summarize_stock(sym, lookback_days=int(args.get("lookback_days", 365)))
-                        evs.append(self._storage.register_evidence(ev))
+                        local.append(self._storage.register_evidence(ev))
 
                 elif name == "financials":
                     sym = str(args.get("symbol", "")).strip()
@@ -146,25 +158,48 @@ class AgentLoop:
                     if _is_safe_symbol(sym):
                         for ev in financials.collect_all(sym, statement_types=kinds,
                                                         periods=int(args.get("periods", 3))):
-                            evs.append(self._storage.register_evidence(ev))
+                            local.append(self._storage.register_evidence(ev))
 
                 elif name == "filings":
                     sym = str(args.get("symbol", "")).strip()
                     if _is_safe_symbol(sym):
                         for ev in filings.collect_filings(sym, years_back=int(args.get("years_back", 2))):
-                            evs.append(self._storage.register_evidence(ev))
+                            local.append(self._storage.register_evidence(ev))
 
                 elif name == "web":
-                    queries = list(args.get("queries") or [])[:_MAX_WEB_QUERIES_PER_PLAN]
+                    # Sanitise LLM-emitted queries before sending them to a
+                    # paid search API: cap length, strip control chars/newlines,
+                    # drop empties. Without this, a hallucinating planner can
+                    # send a multi-paragraph blob as one "query".
+                    raw_queries = list(args.get("queries") or [])[:_MAX_WEB_QUERIES_PER_PLAN]
+                    queries = []
+                    for q in raw_queries:
+                        if not isinstance(q, str):
+                            continue
+                        clean = re.sub(r"[\r\n\t\x00-\x1f]+", " ", q).strip()[:200]
+                        if clean:
+                            queries.append(clean)
                     for q in queries:
                         for ev in self._web.search_and_extract(
                             q, max_results=6, final_top=5, reranker=self._planner_llm
                         ):
-                            evs.append(self._storage.register_evidence(ev))
+                            local.append(self._storage.register_evidence(ev))
                 else:
                     log.warning("unknown tool: %s", name)
             except Exception as e:
                 log.exception("tool %s failed: %s", name, e)
+            return local
+
+        if not tool_calls:
+            return []
+        # Preserve planner order by iterating over the input list and picking
+        # up already-computed results.
+        workers = min(_TOOL_CONCURRENCY, len(tool_calls))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            results = list(pool.map(_dispatch, tool_calls))
+        evs: list[Evidence] = []
+        for chunk in results:
+            evs.extend(chunk)
         return evs
 
     # ---------- market inference ----------
@@ -204,9 +239,16 @@ class AgentLoop:
                 if kw in question:
                     return "cn"
 
-            # 6-digit code anywhere → A-share.
-            if re.search(r"\b\d{6}\b", question):
-                return "cn"
+            # 6-digit code anywhere → A-share, but only if it looks like a
+            # real ticker (00xxxx / 30xxxx / 60xxxx / 68xxxx / 8xxxxx /
+            # 9xxxxx) OR co-occurs with an explicit "stock/code" hint.
+            # Otherwise "202506" (a date) or "123456" (an ID) would flip us
+            # to CN incorrectly.
+            for m in re.finditer(r"\b(\d{6})\b", question):
+                code = m.group(1)
+                if re.match(r"^(00|30|60|68|8|9)\d{4}$", code):
+                    return "cn"
+                # Fall through: not a plausible A-share code, keep scanning.
 
             # Real-looking US ticker (excluding common acronyms).
             for m in re.finditer(r"\b([A-Z]{1,5})\b", question):
@@ -253,8 +295,10 @@ class AgentLoop:
         trace["prefs_in"] = prefs
 
         # 1. Plan (with conversation history for context).
+        t_stage = time.time()
         plan_obj = planner.plan(self._planner_llm, question, prefs, history=history)
         trace["plan"] = plan_obj
+        trace["plan_s"] = round(time.time() - t_stage, 2)
 
         # 2. Market dispatch — pick the right provider bundle for this turn.
         market = self._infer_market(plan_obj.get("tools", []), question=question)
@@ -271,6 +315,7 @@ class AgentLoop:
         has_web = "web" in tool_names
         has_non_web = any(n != "web" for n in tool_names)
 
+        t_stage = time.time()
         if market == "cn":
             # Run only the ``web`` tool through _run_tools — other CN tools have
             # no direct provider and are handled by RAG in step 2b.
@@ -294,10 +339,12 @@ class AgentLoop:
             evs = self._run_tools(tools, providers)
 
         trace["evidence_count_from_tools"] = len(evs)
+        trace["tools_s"] = round(time.time() - t_stage, 2)
 
         # 2b. Retrieve from external data via RAG.
         #     CN → primary evidence source (local files) unless plan is web-only.
         #     US → skip (API tools already provided authoritative data).
+        t_stage = time.time()
         try:
             external_kinds = self._infer_external_kinds(tools)
             if market == "cn" and not web_only_plan:
@@ -321,10 +368,12 @@ class AgentLoop:
         except Exception as e:
             log.warning("External data RAG failed: %s", e)
             trace["evidence_count_from_rag"] = 0
+        trace["rag_s"] = round(time.time() - t_stage, 2)
 
         # 2c. Fallback: no evidence at all → web search.
         if not evs:
             log.info("no evidence from tools or RAG, falling back to web")
+            t_stage = time.time()
             try:
                 for ev in self._web.search_and_extract(
                     question, max_results=6, final_top=5, reranker=self._planner_llm
@@ -334,6 +383,7 @@ class AgentLoop:
                 # Corporate networks may block Tavily; degrade gracefully so
                 # the synthesizer can still emit a "no evidence" answer.
                 log.warning("web fallback failed: %s", e)
+            trace["web_fallback_s"] = round(time.time() - t_stage, 2)
 
         # Cap evidence pool for cost control (order preserved).
         if len(evs) > _MAX_EVIDENCE_TOTAL:
@@ -345,42 +395,67 @@ class AgentLoop:
         sections: list[str] = [s for s in raw_sections if isinstance(s, str)]
 
         # 3. Synthesize.
+        t_synth = time.time()
         draft = synthesizer.synthesize(self._synth_llm, question, prefs, evs, sections, history=history)
         trace["draft_len"] = len(draft)
+        trace["synth_1_s"] = round(time.time() - t_synth, 2)
 
-        # 4. Verify + up to 1 repair.
-        vres = verifier.verify(self._planner_llm, draft, evs)
-        trace["verify_1"] = vres.raw
-        answer = draft
-        if not vres.passed:
-            log.info("verifier failed, attempting repair")
-            answer = synthesizer.synthesize(
-                self._synth_llm, question, prefs, evs, sections,
-                prior_answer=draft, verifier_feedback=vres.feedback,
-            )
-            vres2 = verifier.verify(self._planner_llm, answer, evs)
-            trace["verify_2"] = vres2.raw
-            if not vres2.passed:
-                answer += ("\n\n> ⚠️ **Verifier notice**: 部分论断可能仍存在证据不足,"
-                           "请以下方 Evidence 段落为准。\n")
-
-        # 5. Persist answer + citations.
-        used = sorted(set(int(m) for m in _extract_used_labels(answer)))
-        citations = []
-        for label in used:
-            if 1 <= label <= len(evs):
-                cid = evs[label - 1].chunk_id
-                if cid is not None:
-                    citations.append((f"S{label}", cid))
-        aid = self._storage.save_answer(question, answer, trace, citations)
-        trace["answer_id"] = aid
-        trace["elapsed_s"] = round(time.time() - t0, 2)
-
-        # 6. Memory.
-        prefs_updated = memory.extract_and_update(
-            self._planner_llm, self._storage, question, answer, answer_id=aid
+        # 4. Verify + memory extraction run concurrently on the draft.
+        # Rationale: verifier and memory-extractor are both independent LLM
+        # calls; running them serially added ~1 memory RTT to the critical
+        # path. Memory only needs the user's question intent + a snapshot
+        # of the answer to identify topics, so operating on the draft (vs
+        # the post-repair answer) makes no material difference for topic
+        # extraction. In the common "verify passes" case we save one full
+        # LLM RTT per turn.
+        mem_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="memory")
+        mem_future = mem_pool.submit(
+            memory.extract_and_update,
+            self._planner_llm, self._storage, question, draft, None,
         )
+
+        try:
+            t_verify = time.time()
+            vres = verifier.verify(self._planner_llm, draft, evs)
+            trace["verify_1"] = vres.raw
+            trace["verify_1_s"] = round(time.time() - t_verify, 2)
+            answer = draft
+            if not vres.passed:
+                log.info("verifier failed, attempting repair")
+                t_repair = time.time()
+                answer = synthesizer.synthesize(
+                    self._synth_llm, question, prefs, evs, sections,
+                    prior_answer=draft, verifier_feedback=vres.feedback,
+                )
+                vres2 = verifier.verify(self._planner_llm, answer, evs)
+                trace["verify_2"] = vres2.raw
+                trace["repair_s"] = round(time.time() - t_repair, 2)
+                if not vres2.passed:
+                    answer += ("\n\n> ⚠️ **Verifier notice**: 部分论断可能仍存在证据不足,"
+                               "请以下方 Evidence 段落为准。\n")
+
+            # 5. Persist answer + citations.
+            used = sorted(set(int(m) for m in _extract_used_labels(answer)))
+            citations = []
+            for label in used:
+                if 1 <= label <= len(evs):
+                    cid = evs[label - 1].chunk_id
+                    if cid is not None:
+                        citations.append((f"S{label}", cid))
+            aid = self._storage.save_answer(question, answer, trace, citations)
+            trace["answer_id"] = aid
+
+            # 6. Collect memory result (may already be done).
+            try:
+                prefs_updated = mem_future.result(timeout=30)
+            except Exception as e:
+                log.warning("memory extraction failed / timed out: %s", e)
+                prefs_updated = []
+        finally:
+            mem_pool.shutdown(wait=False)
+
         trace["prefs_updated"] = prefs_updated
+        trace["elapsed_s"] = round(time.time() - t0, 2)
 
         # 7. Record assistant turn in conversation history.
         conv_ctx.add_assistant_turn(answer, metadata={"answer_id": aid, "evidence_count": len(evs)})
@@ -408,4 +483,9 @@ def _is_safe_symbol(sym: str) -> bool:
     return bool(sym) and bool(_SYMBOL_RE.match(sym))
 
 def _extract_used_labels(text: str) -> list[int]:
-    return [int(m.group(1)) for m in re.finditer(r"\[S(\d+)\]", text)]
+
+    # Only count [S#] used inline in the body — the ``## Evidence`` section
+    # groups labels per source and would double-count every citation, e.g.
+    # producing duplicate rows in the ``citations`` table.
+    body = re.split(r"^##\s+Evidence\b", text, maxsplit=1, flags=re.MULTILINE | re.IGNORECASE)[0]
+    return [int(m.group(1)) for m in re.finditer(r"\[S(\d+)\]", body)]

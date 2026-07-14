@@ -64,6 +64,17 @@ class StorageCapability(ABC):
         """Load user preferences."""
         ...
 
+    def get_pref(self, topic: str) -> dict | None:
+        """Fetch a single preference by topic.
+
+        Default implementation scans ``load_prefs`` for backwards compat.
+        Providers should override with an indexed lookup where possible.
+        """
+        for p in self.load_prefs(limit=1000):
+            if p.get("topic") == topic:
+                return p
+        return None
+
     @abstractmethod
     def upsert_pref(
         self,

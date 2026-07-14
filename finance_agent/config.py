@@ -9,6 +9,17 @@ load_dotenv()
 
 ROOT = Path(__file__).resolve().parent.parent
 
+# Hosts whose OpenAI-compatible endpoint doesn't honour
+# ``response_format=json_object`` and needs prompt-side JSON coaching instead.
+# Keeping the list here (rather than in llm_openai.py + pydantic_runtime.py)
+# means adding a new such backend is a single-line change.
+ARK_HOST_MARKERS: tuple[str, ...] = ("ark.cn-beijing.volces.com",)
+
+def is_ark_endpoint(base_url: str | None) -> bool:
+    """True when ``base_url`` points at a JSON-mode-unfriendly Ark host."""
+    if not base_url:
+        return False
+    return any(marker in base_url for marker in ARK_HOST_MARKERS)
 
 @dataclass(frozen=True)
 class Config:
@@ -100,6 +111,5 @@ class Config:
                 f"Missing required config: {missing}. "
                 f"Set them in .env (see .env.example)."
             )
-
 
 CONFIG = Config.load()

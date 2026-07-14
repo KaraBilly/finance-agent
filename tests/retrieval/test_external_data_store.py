@@ -157,12 +157,17 @@ class TestSearchMergesMilvusHits:
         assert len(evidences) == 1
         assert evidences[0].text == "local"
 
-
 class TestEmbedderReadinessGate:
     """Regression: when the embedder isn't ready (sentence-transformers not
-    installed, model download failed), ``ExternalDataStore.__init__`` must
-    disable ``use_embedding`` instead of leaving a broken embedder in place
-    that would raise ``No embedding model available`` on every search.
+    installed, model download failed), the store must disable
+    ``use_embedding`` on first initialization instead of leaving a broken
+    embedder in place that would raise ``No embedding model available`` on
+    every search.
+
+    Embedder init is lazy (deferred to first ``_ensure_embedding_search``
+    call) to avoid downloading the model at construction if the store is
+    never queried. These tests therefore trigger the lazy path explicitly
+    and then assert the readiness gate cleaned up correctly.
     """
 
     def test_unready_embedder_disables_embedding_path(self):
@@ -182,6 +187,8 @@ class TestEmbedderReadinessGate:
                 return_value=fake_emb,
             ):
                 store = ExternalDataStore(use_embedding=True)
+                # Trigger lazy embedder init so the readiness gate runs.
+                store._ensure_embedding_search()
 
         # Broken embedder must be dropped so search() doesn't hit the
         # "No embedding model available" RuntimeError on every call.
@@ -204,6 +211,7 @@ class TestEmbedderReadinessGate:
                 return_value=fake_emb,
             ):
                 store = ExternalDataStore(use_embedding=True)
+                store._ensure_embedding_search()
 
         assert store.use_embedding is True
         assert store._embedding_search is fake_emb

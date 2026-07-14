@@ -6,6 +6,7 @@ import logging
 import re
 import socket
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -21,6 +22,15 @@ from ..retrieval.bm25 import bm25_topk
 from ..retrieval.rerank import llm_rerank
 
 log = logging.getLogger(__name__)
+
+# Hard cap on response body size to defend against decompression bombs /
+# runaway pages. 20 MB is generous for HTML news pages and small filings;
+# anything above this is almost certainly not what we want to feed the LLM.
+_MAX_RESPONSE_BYTES = 20 * 1024 * 1024
+# Concurrency for fanning out URL extraction. Tavily returns ~6 URLs per
+# query; running them sequentially with 15s timeout + 3 retries can burn
+# minutes. Six workers matches the default ``max_results``.
+_FETCH_CONCURRENCY = 6
 
 _SPLIT_RE = re.compile(r"\n{2,}|(?<=[。！？!?])\s+")
 
@@ -88,37 +98,78 @@ def _is_safe_url(url: str) -> bool:
             return False
     return True
 
+def _bounded_get(
+    url: str,
+    *,
+    timeout: int,
+    max_bytes: int = _MAX_RESPONSE_BYTES,
+) -> tuple[bytes, str] | None:
+    """Fetch a URL with a hard size cap.
+
+    Streams the body and aborts as soon as ``max_bytes`` is exceeded so a
+    hostile server can't OOM us with a huge (or infinitely-streamed)
+    payload. Returns ``(body_bytes, content_type)`` or ``None`` on any
+    failure (already logged).
+    """
+    try:
+        with requests.get(
+            url, headers=_DEFAULT_HEADERS, timeout=timeout, stream=True
+        ) as resp:
+            resp.raise_for_status()
+            content_type = resp.headers.get("Content-Type", "")
+            # Bail early on advertised size when servers set it honestly.
+            declared = resp.headers.get("Content-Length")
+            if declared and declared.isdigit() and int(declared) > max_bytes:
+                log.warning(
+                    "Refusing %s: Content-Length %s exceeds cap %d",
+                    url, declared, max_bytes,
+                )
+                return None
+            buf = bytearray()
+            for chunk in resp.iter_content(chunk_size=64 * 1024):
+                if not chunk:
+                    continue
+                buf.extend(chunk)
+                if len(buf) > max_bytes:
+                    log.warning(
+                        "Refusing %s: body exceeded cap %d bytes mid-stream",
+                        url, max_bytes,
+                    )
+                    return None
+            return bytes(buf), content_type
+    except requests.exceptions.HTTPError as exc:
+        status = exc.response.status_code if exc.response else "unknown"
+        log.debug("HTTP %s for %s", status, url)
+    except requests.exceptions.Timeout:
+        log.debug("Timeout fetching %s", url)
+    except requests.exceptions.ConnectionError as exc:
+        log.debug("Connection error for %s: %s", url, exc)
+    except Exception as exc:
+        log.debug("Error fetching %s: %s", url, exc)
+    return None
+
 def _fetch_with_retry(
     url: str,
     *,
     max_retries: int = 3,
     timeout: int = 15,
 ) -> str | None:
-    """Fetch URL with retries and exponential backoff."""
+    """Fetch URL text with retries, exponential backoff, and size cap."""
     if not _is_safe_url(url):
         return None
     for attempt in range(1, max_retries + 1):
-        try:
-            resp = requests.get(url, headers=_DEFAULT_HEADERS, timeout=timeout)
-            resp.raise_for_status()
-            return resp.text
-        except requests.exceptions.HTTPError as exc:
-            status = exc.response.status_code if exc.response else "unknown"
-            if status == 403:
-                log.warning("403 Forbidden for %s (attempt %d/%d)", url, attempt, max_retries)
-            elif status == 429:
-                log.warning("429 Too Many Requests for %s (attempt %d/%d)", url, attempt, max_retries)
-            else:
-                log.warning("HTTP %s for %s (attempt %d/%d)", status, url, attempt, max_retries)
-        except requests.exceptions.Timeout:
-            log.warning("Timeout fetching %s (attempt %d/%d)", url, attempt, max_retries)
-        except requests.exceptions.ConnectionError as exc:
-            log.warning("Connection error for %s (attempt %d/%d): %s", url, attempt, max_retries, exc)
-        except Exception as exc:
-            log.warning("Error fetching %s (attempt %d/%d): %s", url, attempt, max_retries, exc)
+        result = _bounded_get(url, timeout=timeout)
+        if result is not None:
+            body, _ct = result
+            try:
+                return body.decode("utf-8", errors="replace")
+            except Exception as exc:
+                log.debug("decode failed for %s: %s", url, exc)
+                return None
         if attempt < max_retries:
             sleep_time = 2 ** attempt
-            log.info("Retrying %s in %ds...", url, sleep_time)
+            log.info("Retrying %s in %ds (attempt %d/%d)...",
+                     url, sleep_time, attempt, max_retries)
             time.sleep(sleep_time)
     log.warning("All retries failed for %s, skipping", url)
     return None
@@ -142,22 +193,27 @@ class TavilyWebProvider(WebSearchCapability):
 
     def _extract_pdf(self, url: str) -> str:
         """Download and extract text from a PDF URL."""
+        # ::: Code Generated by Copilot 3a1e7b02-2fb1-4b8c-9c07-4ed9c5f0a101. This comment will be removed automatically after the file is saved :::
+        # Defence-in-depth: re-check SSRF here even though ``extract_content``
+        # already gated us. If a future caller wires _extract_pdf directly,
+        # they still get the guard.
+        if not _is_safe_url(url):
+            log.warning("skipping unsafe PDF URL: %s", url)
+            return ""
         try:
             import fitz  # PyMuPDF
-            
-            # Download PDF with retries
-            pdf_bytes = None
+
+            # Download PDF with retries + hard size cap so a huge PDF can't
+            # exhaust memory in a single ``resp.content`` read.
+            pdf_bytes: bytes | None = None
             for attempt in range(1, 4):
-                try:
-                    resp = requests.get(url, headers=_DEFAULT_HEADERS, timeout=30)
-                    resp.raise_for_status()
-                    pdf_bytes = resp.content
+                result = _bounded_get(url, timeout=30)
+                if result is not None:
+                    pdf_bytes, _ct = result
                     break
-                except Exception as e:
-                    log.debug("PDF download attempt %d failed for %s: %s", attempt, url, e)
-                    if attempt < 3:
-                        time.sleep(2 ** attempt)
-            
+                if attempt < 3:
+                    time.sleep(2 ** attempt)
+
             if not pdf_bytes:
                 return ""
             
@@ -273,22 +329,41 @@ class TavilyWebProvider(WebSearchCapability):
         if not hits:
             return []
 
-        # Extract + chunk
-        candidates: list[tuple[str, dict]] = []
-        for h in hits:
-            url = h.get("url", "")
-            title = h.get("title", "")
-            publisher = h.get("source") or (url.split("/")[2] if "://" in url else "")
-            snippet = h.get("content", "") or ""
-            text = self.extract_content(url, fallback_snippet=snippet)
+        # ::: Code Generated by Copilot 3a1e7b02-2fb1-4b8c-9c07-4ed9c5f0a101. This comment will be removed automatically after the file is saved :::
+        # Extract + chunk. Fan out URL extraction in parallel — network I/O
+        # is the dominant cost here, so a small thread pool cuts wall time
+        # for a typical 6-URL query from ~30s to ~5s in practice.
+        def _one(hit: dict) -> tuple[str, dict, str] | None:
+            url = hit.get("url", "") or ""
+            if not url:
+                return None
+            title = hit.get("title", "") or ""
+            publisher = hit.get("source") or (
+                url.split("/")[2] if "://" in url else ""
+            )
+            snippet = hit.get("content", "") or ""
+            try:
+                text = self.extract_content(url, fallback_snippet=snippet)
+            except Exception as exc:
+                log.warning("extract_content failed for %s: %s", url, exc)
+                return None
             if not text:
-                continue
-            raw_path = self._cache_path(url)
-            for ch in self._chunk(text):
-                candidates.append((ch, {
-                    "url": url, "title": title, "publisher": publisher,
-                    "raw_path": str(raw_path),
-                }))
+                return None
+            return url, {
+                "url": url,
+                "title": title,
+                "publisher": publisher,
+                "raw_path": str(self._cache_path(url)),
+            }, text
+
+        candidates: list[tuple[str, dict]] = []
+        with ThreadPoolExecutor(max_workers=min(_FETCH_CONCURRENCY, len(hits))) as pool:
+            for res in pool.map(_one, hits):
+                if not res:
+                    continue
+                _url, meta, text = res
+                for ch in self._chunk(text):
+                    candidates.append((ch, meta))
         if not candidates:
             return []
         log.info("web candidates: %d chunks from %d urls", len(candidates), len(hits))

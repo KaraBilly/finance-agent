@@ -24,18 +24,15 @@ from pydantic_ai import Agent
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
+from ..config import is_ark_endpoint
 from ..providers.llm_openai import OpenAICompatibleLLM
 
 TOut = TypeVar("TOut", bound=BaseModel)
 
 # Some upstreams (火山方舟 Ark) reject ``response_format=json_object`` even when
-# the pydantic-ai OpenAI backend tries to enable it. Detect them by base_url so
-# we can add a belt-and-braces prompt instruction instead of a hard
-# ``response_format`` constraint.
-_ARK_HOST_MARKERS = ("ark.cn-beijing.volces.com",)
-
-def _is_ark(base_url: str) -> bool:
-    return any(marker in base_url for marker in _ARK_HOST_MARKERS)
+# the pydantic-ai OpenAI backend tries to enable it. Host detection is
+# centralised in ``config.is_ark_endpoint``.
+_is_ark = is_ark_endpoint
 
 def build_agent(
     llm: OpenAICompatibleLLM,

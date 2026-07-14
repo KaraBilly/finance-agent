@@ -13,6 +13,7 @@ Usage:
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 from ..capabilities.base import Evidence
@@ -80,40 +81,67 @@ class UnifiedRetriever:
         """
         all_evidences: list[Evidence] = []
 
-        # 1. Retrieve from external data
-        if use_external:
+        # LLM rerank is expensive; we only want to pay for it ONCE per turn.
+        # Give each source its own BM25 shortlist (no reranker) and then do
+        # a single cross-source LLM rerank on the union below. Previously
+        # each of external/web reranked, and then the unified layer reranked
+        # again — three paid LLM calls where one suffices.
+        internal_reranker = None
+
+        # Run external + web retrieval concurrently. They're both I/O-heavy
+        # (Milvus/BM25 disk hit vs. Tavily HTTP + Trafilatura extraction) and
+        # completely independent, so their wall time was previously additive.
+        # Running in parallel drops it to max(external, web).
+        def _get_external() -> list[Evidence]:
+            if not use_external:
+                return []
             try:
-                external_evs = self.external_store.search(
+                evs = self.external_store.search(
                     query,
                     source_kinds=external_kinds,
                     bm25_top=_MAX_EXTERNAL * 2,
                     final_top=_MAX_EXTERNAL,
-                    reranker=self.registry.planner_llm,
+                    reranker=internal_reranker,
                 )
-                all_evidences.extend(external_evs)
-                log.info("External data: %d evidence", len(external_evs))
+                log.info("External data: %d evidence", len(evs))
+                return evs
             except Exception as e:
                 log.warning("External data retrieval failed: %s", e)
+                return []
 
-        # 2. Retrieve from web
-        if use_web:
+        def _get_web() -> list[Evidence]:
+            if not use_web:
+                return []
             try:
-                web_evs = self.registry.web_search.search_and_extract(
+                evs = self.registry.web_search.search_and_extract(
                     query,
                     max_results=6,
                     final_top=_MAX_WEB,
-                    reranker=self.registry.planner_llm,
+                    reranker=internal_reranker,
                 )
-                all_evidences.extend(web_evs)
-                log.info("Web search: %d evidence", len(web_evs))
+                log.info("Web search: %d evidence", len(evs))
+                return evs
             except Exception as e:
                 log.warning("Web search failed: %s", e)
+                return []
+
+        # Only spin up the pool when both sides are actually needed;
+        # otherwise a single inline call saves the thread overhead.
+        if use_external and use_web:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                ext_fut = pool.submit(_get_external)
+                web_fut = pool.submit(_get_web)
+                all_evidences.extend(ext_fut.result())
+                all_evidences.extend(web_fut.result())
+        else:
+            all_evidences.extend(_get_external())
+            all_evidences.extend(_get_web())
 
         if not all_evidences:
             log.warning("No evidence retrieved from any source")
             return []
 
-        # 3. Cross-source reranking (BM25 + LLM)
+        # 3. Cross-source reranking (BM25 + LLM) — the ONE paid rerank per turn.
         if len(all_evidences) > final_top:
             try:
                 all_evidences = self._rerank_all(query, all_evidences, final_top)

@@ -108,11 +108,27 @@ class ConversationManager:
         )
     
     def get_history(self, conversation_id: str, max_turns: int | None = None) -> list[dict[str, str]]:
-        """Get conversation history formatted for LLM context."""
-        conv = self.get_conversation(conversation_id)
-        if not conv:
-            return []
-        return conv.get_history(max_turns=max_turns)
+        """Get conversation history formatted for LLM context.
+
+        Fast path: query only the last ``max_turns`` rows directly. Previous
+        implementation loaded the entire conversation (all turns, metadata,
+        JSON parsing per row) even when we only needed the tail — every ask()
+        got slower as the conversation grew.
+        """
+        if max_turns is None:
+            conv = self.get_conversation(conversation_id)
+            return conv.get_history() if conv else []
+
+        with self.storage._connect() as conn:
+            rows = conn.execute(
+                "SELECT role, content FROM conversation_turns "
+                "WHERE conversation_id = ? "
+                "ORDER BY timestamp DESC LIMIT ?",
+                (conversation_id, max_turns),
+            ).fetchall()
+        # Rows come back newest-first from SQLite; flip to chronological
+        # order so the LLM sees history the way it happened.
+        return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
     
     def list_conversations(self, limit: int = 10) -> list[dict[str, Any]]:
         """List recent conversations."""

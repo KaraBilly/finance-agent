@@ -8,6 +8,7 @@ with an EMA on the weight. Topics use snake_case; keep them stable across turns.
 from __future__ import annotations
 
 import logging
+import re
 
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
@@ -24,6 +25,13 @@ _TOPIC_HINTS = [
     "competition", "regulatory_risk", "esg", "valuation",
     "dividend_policy", "supply_chain", "management_quality", "capex",
 ]
+
+# Topic slugs come from an LLM that can be prompt-injected by scraped web
+# content, so we validate before letting them into the ``user_prefs`` table.
+# snake_case ASCII, ≤ 40 chars — enough for descriptive slugs, tight enough
+# to prevent long junk strings.
+_TOPIC_RE = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
+_MAX_TOPIC_LEN = 40
 
 _EMA_ALPHA = 0.4
 
@@ -85,7 +93,6 @@ def extract_and_update(model: LLMCapability, storage: StorageCapability,
 
     return persist_prefs(storage, payload, answer_id=answer_id)
 
-
 def persist_prefs(storage: StorageCapability, payload: PrefExtractionResult,
                   *, answer_id: int | None = None) -> list[dict]:
     """Apply a :class:`PrefExtractionResult` to storage with EMA smoothing.
@@ -95,9 +102,17 @@ def persist_prefs(storage: StorageCapability, payload: PrefExtractionResult,
     """
     updated: list[dict] = []
     for p in payload.prefs:
-        topic = p.topic.strip().lower()
+
+        # Normalise + validate. The LLM produces this string and can be
+        # prompt-injected by scraped web content — reject anything that
+        # doesn't look like a snake_case slug so we can't poison the
+        # ``user_prefs`` table with attacker-controlled long strings.
+        topic = p.topic.strip().lower()[:_MAX_TOPIC_LEN]
         delta = float(p.delta)
         if not topic or delta == 0:
+            continue
+        if not _TOPIC_RE.match(topic):
+            log.info("memory: dropping invalid topic slug %r", topic)
             continue
         # Merge with existing weight via EMA against a clipped target.
         # Original code was ``new = (1-α)·current + α·(current+delta)`` which
@@ -114,7 +129,9 @@ def persist_prefs(storage: StorageCapability, payload: PrefExtractionResult,
     return updated
 
 def _current_weight(storage: StorageCapability, topic: str) -> float:
-    for p in storage.load_prefs(limit=1000):
-        if p["topic"] == topic:
-            return float(p["weight"])
+    # Prefer an indexed single-row lookup when the backend exposes one;
+    # fall back to a full scan for exotic StorageCapability impls.
+    pref = storage.get_pref(topic)
+    if pref is not None:
+        return float(pref.get("weight", 0.0))
     return 0.0

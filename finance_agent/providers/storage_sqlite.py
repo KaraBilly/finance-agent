@@ -160,6 +160,16 @@ class SQLiteStorageProvider(StorageCapability):
             ).fetchall()
             return [dict(r) for r in rows]
 
+    def get_pref(self, topic: str) -> dict | None:
+        """Indexed single-topic lookup. Avoids the full-table scan the
+        default capability impl would do via ``load_prefs``."""
+        with self._connect() as c:
+            row = c.execute(
+                "SELECT topic,weight,note,last_seen FROM user_prefs WHERE topic=?",
+                (topic,),
+            ).fetchone()
+            return dict(row) if row else None
+
     def upsert_pref(
         self,
         topic: str,

@@ -53,9 +53,13 @@ class OpenAICompatibleLLM(LLMCapability):
         if effective_max_tokens is not None:
             kwargs["max_tokens"] = effective_max_tokens
         if json_mode:
-            # 火山方舟等部分模型不支持 json_object，改用 prompt 方式
+
+            # 火山方舟等部分模型不支持 json_object，改用 prompt 方式.
+            # Host detection is centralised in ``config.is_ark_endpoint`` so
+            # adding another such backend is a one-liner in config.py.
+            from ..config import is_ark_endpoint
             base_url = str(self.client.base_url)
-            if "ark.cn-beijing.volces.com" in base_url:
+            if is_ark_endpoint(base_url):
                 # 在 system 或 user message 中追加 JSON 格式要求
                 if payload and payload[0].get("role") == "system":
                     payload[0]["content"] += "\n\n请直接输出 JSON 格式，不要包含 markdown 代码块标记。"

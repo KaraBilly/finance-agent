@@ -28,6 +28,13 @@ log = logging.getLogger(__name__)
 
 _CITE_RE = re.compile(r"\[S(\d+)\]")
 
+# Per-evidence text budget when constructing the verifier prompt. 800 was too
+# tight — a numeric claim citing [S3] could easily reference text past the
+# 800th char, causing the verifier to (correctly, from its POV) flag it as
+# unsupported and trigger a wasted repair. 2400 fits comfortably alongside
+# ~20 evidences in a modern context window.
+_VERIFY_EV_CHARS = 2400
+
 # ---------------------------------------------------------------------------
 # Output schemas (validated by pydantic-ai)
 # ---------------------------------------------------------------------------
@@ -121,10 +128,12 @@ def verify(model: LLMCapability, draft: str, evidences: list[Evidence]) -> Verif
 
     # ---- LLM factual check ----
     ev_str = "\n\n".join(
-        f"[S{i}] {(e.title or '')}: {e.text[:800]}" for i, e in enumerate(evidences, 1)
+        f"[S{i}] {(e.title or '')}: {e.text[:_VERIFY_EV_CHARS]}"
+        for i, e in enumerate(evidences, 1)
     )
     user = f"# Evidence\n{ev_str}\n\n# Draft\n{draft}\n\nReturn a VerifyVerdict."
 
+    verifier_error: str | None = None
     try:
         agent = build_verifier_agent(model)
         result = agent.run_sync(user)
@@ -132,10 +141,12 @@ def verify(model: LLMCapability, draft: str, evidences: list[Evidence]) -> Verif
     except Exception as e:
         # Fail-closed: if the verifier LLM is unreachable OR pydantic-ai
         # exhausts its retries on schema-validation failure, treat the draft
-        # as unverified rather than silently declaring victory. This
-        # surfaces the outage to the caller (via feedback) and triggers the
-        # single repair pass so at least we get a second synthesis attempt.
+        # as unverified rather than silently declaring victory. We record
+        # ``verifier_error`` in the trace so callers can distinguish an
+        # infrastructure outage ("verifier crashed") from a content problem
+        # ("draft has unsupported claims").
         log.warning("verifier LLM failed: %s", e)
+        verifier_error = str(e)
         verdict = VerifyVerdict(
             passed=False,
             issues=[VerifyIssue(
@@ -161,6 +172,8 @@ def verify(model: LLMCapability, draft: str, evidences: list[Evidence]) -> Verif
         "prog_issues": prog_issues,
         "llm": verdict.model_dump(),
     }
+    if verifier_error is not None:
+        raw["verifier_error"] = verifier_error
     return VerifyResult(
         passed=passed,
         feedback="\n\n".join(feedback_parts),
