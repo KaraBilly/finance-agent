@@ -12,60 +12,108 @@
 - **长期用户偏好**：用户关注点持久化，影响后续 planning
 - **多轮对话**：上下文感知，自动维护对话历史
 
-设计详解 → [`docs/design.md`](./docs/design.md)
+设计详解 → [`docs/design.md`](./docs/design.md) · 可执行 demo → [`demos/README.md`](./demos/README.md)
 
 ---
 
 ## 快速开始
 
-### 1. 环境
+下面两条 demo 路径彼此独立，任选其一即可跑通。**美股路径最短**（只要 API key）；**A 股路径**多两步（下载数据 + 灌 Milvus），全部由 [`setup_all.sh`](./setup_all.sh) 完成。
 
-**要求 Python >= 3.10**
+### 0. 前置
+
+- Python **>= 3.10**
+- Docker Desktop（仅 A 股路径需要，用来跑 Milvus + etcd + MinIO）
+- API keys — 见下表
+
+### 1. 安装
 
 ```bash
 git clone <this-repo> finance-agent
 cd finance-agent
 python3.10 -m venv .venv && source .venv/bin/activate
 pip install -e .
+cp .env.example .env             # 然后编辑 .env 填入 keys
+python -m finance_agent init     # 建 SQLite provenance 库
 ```
 
-### 2. 配置密钥
+**API key 说明**（`.env`）：
 
-```bash
-cp .env.example .env
-# 编辑 .env，填入 API keys
-```
+| Key | 何时必填 | 说明 |
+|-----|---------|------|
+| `ARK_API_KEY`      | 两条路径都必填 | 火山方舟 doubao-seed-evolving — planner / verifier / memory |
+| `DEEPSEEK_API_KEY` | 两条路径都必填 | deepseek-chat — synthesizer |
+| `TAVILY_API_KEY`   | 两条路径都必填 | Web 搜索 |
+| `FINNHUB_API_KEY`  | **仅美股** 必填 | 免费版 60 次/分钟 |
 
-**必填 API key：**
+> 市场（美股 / A 股）**按问题自动推断**（见 `agent/loop.py::_infer_market`）——问题里出现 `AAPL`/`MSFT` 等美股 ticker 或英文 → 走 US；出现 `002594`/`比亚迪` 等 A 股代码或中文公司名 → 走 CN。**不需要设 `FA_MARKET` 环境变量**（代码里不读它）。
 
-| 后端 | 环境变量 | 说明 |
-|------|---------|------|
-| **Doubao** | `ARK_API_KEY` | doubao-seed-evolving，负责 planner/verifier/memory |
-| **DeepSeek** | `DEEPSEEK_API_KEY` | deepseek-chat，负责 synthesizer |
-| **Tavily** | `TAVILY_API_KEY` | web 搜索 |
-| **Finnhub** | `FINNHUB_API_KEY` | 美股行情/财务/公告（免费版 60 次/分钟） |
+---
 
-### 3. 初始化
+### Demo 路径 A · 美股（推荐先跑这条）
 
-```bash
-python -m finance_agent init
-```
-
-### 4. 提问
+只依赖 Finnhub API，**无需 Docker，无需 Milvus，无需下载**。
 
 ```bash
 # 单轮
-python -m finance_agent ask "Apple(AAPL) 的主要风险因素有哪些?"
+python -m finance_agent ask "苹果公司(AAPL)的基本面情况如何?请给出当前股价、市值和主要财务指标。"
 
 # 多轮对话
-python -m finance_agent chat
-# 输入 `new` 开始新对话，`exit` 退出
+python -m finance_agent chat        # `new` 开始新对话，`exit` 退出
 ```
 
-答案输出到 `outputs/`：
-- `<ts>-ans<id>.md` — Markdown
-- `<ts>-ans<id>.html` — 浏览器打开
-- `<ts>-ans<id>.sources.json` — 完整 provenance
+更多美股 demo 问题 → [`demos/README.md`](./demos/README.md)。
+
+---
+
+### Demo 路径 B · A 股（需要 Milvus + 本地数据）
+
+A 股没有 API，全部靠本地文件（K 线 CSV + 财报 PDF/HTML）+ Milvus 向量检索。一条命令完成下载 + 启 Milvus + 灌入：
+
+```bash
+./setup_all.sh                 # 首次全流程；已有旧数据会交互提示 recreate / append / skip
+./setup_all.sh --yes           # 非交互 (CI)，自动 recreate
+./setup_all.sh --skip-download # 数据已在磁盘上，只重灌 Milvus
+```
+
+脚本会依次做：
+
+1. 拉取比亚迪 / 宁德时代 / 中际旭创 20 年日线 + 周线 → `data/market/stocks/`
+2. 拉取比亚迪 / 寒武纪 / 中际旭创 / 宁德时代 近 10 年财报 → `data/financials/downloads/`
+3. `docker compose up -d`（etcd + MinIO + Milvus），轮询 `/healthz` 直到就绪
+4. `scripts/import_to_milvus.py --recreate` — 分块 + 向量化 + 写入 collection `finance_docs`
+
+**验证 Milvus 就绪**：
+
+```bash
+docker ps | grep milvus                              # 3 个容器 running
+curl -fsS http://localhost:9091/healthz && echo OK   # 应返回 OK
+```
+
+**跑 demo 问题**：
+
+```bash
+python -m finance_agent ask "宁德时代(300750)最近两年的营收和净利润变化情况?"
+python -m finance_agent ask "比亚迪(002594)自己如何描述其面临的竞争?"
+```
+
+更多 A 股 demo → [`demos/README.md`](./demos/README.md)。
+
+完事后停 Milvus：`./stop_milvus.sh`（数据保留在 `volumes/`）。
+
+---
+
+### 2. 输出与验证
+
+每次 `ask` / `chat` 都会在 `outputs/` 生成三个同名文件：
+
+| 文件 | 用途 |
+|---|---|
+| `<ts>-ans<id>.md`            | 最终 Markdown 答案（含 `[S#]` 引用） |
+| `<ts>-ans<id>.html`          | 同一份答案的浏览器渲染版 |
+| `<ts>-ans<id>.sources.json`  | 完整 provenance：每条 `[S#]` 对应的 URL / 文件 / 原文片段 / trace |
+
+打开 `outputs/<最新>-ans1.html` 即可肉眼验证 demo 是否成功；若 `sources.json` 为空，说明 planner 没抽出证据 —— 先检查 API key 与（A 股场景下）Milvus 是否有数据。
 
 ---
 
@@ -173,32 +221,36 @@ python -m finance_agent clear-prefs  # 清空偏好
 
 ---
 
-## 市场切换
+## 市场路由
 
-通过环境变量切换市场：
+市场是**按问题自动推断**的，无需环境变量：
 
-```bash
-export FA_MARKET=us   # 默认，美股（Finnhub API）
-export FA_MARKET=cn   # A股（外挂本地数据）
-```
+- 问题里出现美股 ticker（`AAPL` / `MSFT` / `NVDA`…）或纯英文 → 走 **US** provider（Finnhub API）
+- 问题里出现 A 股代码（`002594` / `300750`…）或中文公司名 → 走 **CN** provider（本地文件 + Milvus）
+- 都推不出来时回退到 `DEFAULT_MARKET = "us"`（见 [`registry.py`](./finance_agent/registry.py)）
 
-或在 `.env` 中设置 `FA_MARKET`。
+**A 股数据源**：`data/market/stocks/*.csv` + `data/financials/downloads/**/*.{pdf,html}`；由 `setup_all.sh` 生成并灌入 Milvus。
 
-**A股数据源：**
-- 外挂本地文件（`data/market/`, `data/financials/`, `data/filings/`）
-- 无 API 调用，纯本地数据
-
-**美股数据源：**
-- Finnhub API（免费版 60 次/分钟）
-- 实时报价、财务指标、完整财报、SEC 文件、新闻、分析师推荐
+**美股数据源**：Finnhub API — 实时报价、财务指标、财报、SEC 文件、新闻、分析师推荐。
 
 ---
+
+## 常见问题
+
+**Q: `ask` 报 `sources.json` 为空 / 答案里没有 `[S#]`？**  
+A: 多半是证据池为空。美股场景检查 `FINNHUB_API_KEY`；A 股场景先跑 `./setup_all.sh --skip-download` 确认 Milvus 里 `finance_docs` collection 有行数（脚本会打印当前 `num_entities`）。
+
+**Q: Milvus 已经有旧数据，再跑 `setup_all.sh` 会怎样？**  
+A: 脚本会先探测 collection 行数，然后提示 `r/a/s/q`：`r`ecreate（丢弃重建，推荐）/ `a`ppend（追加，⚠️ 会产生重复）/ `s`kip / `q`uit。非交互场景加 `--yes` 默认 recreate。
+
+**Q: 只想跑美股 demo，需要装 Docker/Milvus 吗？**  
+A: 不需要。美股完全走 Finnhub API，跳过整个"路径 B"即可。
 
 ## 已知限制
 
 - Finnhub free tier 限制 60 次/分钟
-- A股依赖外挂数据，需提前准备数据文件
+- A 股依赖本地数据，首次需运行 `./setup_all.sh`（约 5–15 分钟）
 - Verifier 只查引用一致性，不判证据真伪
-- 每次问答约 5-8 次 LLM 调用
+- 每次问答约 5–8 次 LLM 调用
 
 更多 → [`docs/design.md`](./docs/design.md)
