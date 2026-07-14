@@ -51,6 +51,11 @@ dependencies = [
     "PyMuPDF>=1.23.0",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
 [project.scripts]
 finance-agent = "finance_agent.cli:main"
 

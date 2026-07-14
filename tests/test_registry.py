@@ -8,10 +8,10 @@ from finance_agent.registry import (
     create_default_registry,
     create_llm_provider,
 )
-from finance_agent.providers.us import (
-    FinnhubMarketProvider,
-    FinnhubFinancialsProvider,
-    FinnhubFilingsProvider,
+from finance_agent.providers.cn import (
+    ExternalAshareMarketProvider,
+    ExternalAshareFinancialsProvider,
+    ExternalAshareFilingsProvider,
 )
 from finance_agent.providers import TavilyWebProvider, SQLiteStorageProvider
 from finance_agent.capabilities import (
@@ -46,17 +46,16 @@ class TestProviderRegistry:
 class TestCreateDefaultRegistry:
     """Tests for default registry creation."""
 
-    @patch("finance_agent.providers.us.market_finnhub.CONFIG")
-    def test_uses_us_providers(self, mock_config):
-        """Default registry should use US providers."""
-        mock_config.finnhub_api_key = "test_key"
+    def test_uses_default_cn_external_providers(self):
+        """Default registry should use A-share external providers for data."""
         with patch("finance_agent.providers.llm_openai.OpenAI"):
             with patch("finance_agent.providers.us.market_finnhub.requests.Session"):
                 registry = create_default_registry()
 
-        assert isinstance(registry.market_data, FinnhubMarketProvider)
-        assert isinstance(registry.financials, FinnhubFinancialsProvider)
-        assert isinstance(registry.filings, FinnhubFilingsProvider)
+        # A-share market/financials/filings come from external local files
+        assert isinstance(registry.market_data, ExternalAshareMarketProvider)
+        assert isinstance(registry.financials, ExternalAshareFinancialsProvider)
+        assert isinstance(registry.filings, ExternalAshareFilingsProvider)
         assert isinstance(registry.web_search, TavilyWebProvider)
         assert isinstance(registry.storage, SQLiteStorageProvider)
 

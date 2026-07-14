@@ -70,6 +70,10 @@ class SQLiteStorageProvider(StorageCapability):
     def _connect(self):
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
+        # SQLite disables foreign-key enforcement by default. We rely on
+        # ON DELETE CASCADE for conversation_turns, so it must be turned on
+        # per-connection.
+        conn.execute("PRAGMA foreign_keys = ON")
         try:
             yield conn
             conn.commit()
