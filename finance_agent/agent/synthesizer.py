@@ -27,7 +27,12 @@ Rules — absolutely mandatory:
   citations like [S3] or [S1][S4]. Multiple citations are fine.
 - Do NOT use knowledge outside the evidence. If evidence is insufficient for a section,
   write "证据不足" (or "Insufficient evidence") for that section and explain what's missing.
-- Include a final `## Evidence` section that lists each cited [S#] with title and URL.
+- Include a final `## Evidence` section that lists SOURCES (not chunks). Group multiple
+  [S#] labels that share the same document/URL onto one bullet. Format each bullet as:
+      - [S1][S3][S4] <document title> — <URL or publisher>
+  Do NOT emit one bullet per [S#] when several point at the same source; that produces
+  visually duplicated entries. When only one [S#] cites a source, a single-label bullet
+  is fine.
 - Keep it structured, terse, and skimmable.
 """
 
