@@ -6,12 +6,13 @@ but implemented without requiring Python 3.10+.
 from __future__ import annotations
 import json
 import logging
+import time
+import uuid
 from typing import Any
 
 from .conversation import Conversation, ConversationTurn, CONVERSATION_SCHEMA
 
 log = logging.getLogger(__name__)
-
 
 class ConversationManager:
     """Manages conversation state and persistence.
@@ -79,8 +80,10 @@ class ConversationManager:
     def add_turn(self, conversation_id: str, role: str, content: str, 
                  metadata: dict[str, Any] | None = None) -> ConversationTurn:
         """Add a turn to an existing conversation."""
-        turn_id = Conversation.create().conversation_id  # Just for UUID generation
-        now = __import__('time').time()
+        # Previously called Conversation.create() just to steal its UUID,
+        # which also mutated timestamps for no reason. Use uuid4 directly.
+        turn_id = str(uuid.uuid4())
+        now = time.time()
         
         with self.storage._connect() as conn:
             conn.execute(
@@ -133,7 +136,6 @@ class ConversationManager:
             conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
             return True
 
-
 class ConversationContext:
     """Conversation context for managing multi-turn dialogue state.
     
@@ -170,12 +172,18 @@ class ConversationContext:
     def add_user_turn(self, content: str, metadata: dict[str, Any] | None = None) -> ConversationTurn:
         """Add a user turn to the current conversation."""
         conv = self.ensure_conversation()
-        return self.manager.add_turn(conv.conversation_id, "user", content, metadata)
+        turn = self.manager.add_turn(conv.conversation_id, "user", content, metadata)
+        # Invalidate the cached Conversation so ``self.conversation`` re-loads
+        # from storage and includes this new turn on next access.
+        self._conversation = None
+        return turn
     
     def add_assistant_turn(self, content: str, metadata: dict[str, Any] | None = None) -> ConversationTurn:
         """Add an assistant turn to the current conversation."""
         conv = self.ensure_conversation()
-        return self.manager.add_turn(conv.conversation_id, "assistant", content, metadata)
+        turn = self.manager.add_turn(conv.conversation_id, "assistant", content, metadata)
+        self._conversation = None
+        return turn
     
     def get_history(self, max_turns: int | None = None) -> list[dict[str, str]]:
         """Get formatted conversation history."""

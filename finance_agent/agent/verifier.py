@@ -37,13 +37,11 @@ Return STRICT JSON:
 If there are no material issues, return passed=true with empty issues.
 """
 
-
 @dataclass
 class VerifyResult:
     passed: bool
     feedback: str
     raw: dict
-
 
 def _paragraph_citation_check(draft: str) -> list[str]:
     """Return a list of missing-citation warnings (paragraph-level)."""
@@ -62,10 +60,8 @@ def _paragraph_citation_check(draft: str) -> list[str]:
             warnings.append(p[:120] + ("…" if len(p) > 120 else ""))
     return warnings
 
-
 def _cited_labels(draft: str) -> set[int]:
     return {int(m.group(1)) for m in _CITE_RE.finditer(draft)}
-
 
 def verify(model: LLMCapability, draft: str, evidences: list[Evidence]) -> VerifyResult:
     # ---- programmatic ----
@@ -90,8 +86,19 @@ def verify(model: LLMCapability, draft: str, evidences: list[Evidence]) -> Verif
             temperature=0.0,
         )
     except Exception as e:
+        # Fail-closed: if the verifier LLM is unreachable, treat the draft as
+        # unverified rather than silently declaring victory. This surfaces the
+        # outage to the caller (via feedback + a warning banner) and triggers
+        # the single repair pass so at least we get a second synthesis attempt.
         log.warning("verifier LLM failed: %s", e)
-        obj = {"passed": True, "issues": []}
+        obj = {
+            "passed": False,
+            "issues": [{
+                "claim": "verifier unavailable",
+                "why": f"LLM verification skipped due to error: {e}",
+                "suggest": "manual review recommended",
+            }],
+        }
 
     llm_issues = obj.get("issues", []) if isinstance(obj, dict) else []
     passed = obj.get("passed", True) and not prog_issues

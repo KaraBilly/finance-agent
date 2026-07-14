@@ -23,19 +23,16 @@ from .providers import SQLiteStorageProvider
 
 console = Console()
 
-
 def _configure_logging():
     logging.basicConfig(
         level=getattr(logging, CONFIG.log_level.upper(), logging.INFO),
         format="%(levelname)s %(name)s: %(message)s",
     )
 
-
 @click.group()
 def cli():
     """Finance Personal Agent (A-share) — doubao + deepseek."""
     _configure_logging()
-
 
 @cli.command()
 @click.argument("question", nargs=-1, required=True)
@@ -70,7 +67,6 @@ def ask(question, quiet):
 
     if result.conversation_id:
         console.print(f"[dim]conversation: {result.conversation_id}[/dim]")
-
 
 @cli.command()
 @click.option("--conversation-id", help="Continue existing conversation")
@@ -113,7 +109,6 @@ def chat(conversation_id):
         console.print(f"[dim]conversation: {result.conversation_id}[/dim]")
         console.rule()
 
-
 @cli.command()
 def prefs():
     """Show current user preferences."""
@@ -131,20 +126,15 @@ def prefs():
         tbl.add_row(r["topic"], f"{r['weight']:.2f}", r.get("note") or "")
     console.print(tbl)
 
-
 @cli.command("clear-prefs")
 def clear_prefs():
     """Delete all stored user preferences."""
     storage = SQLiteStorageProvider()
     storage.init()
-    # Direct SQL for clearing - could add to StorageCapability if needed
-    import sqlite3
-    conn = sqlite3.connect(CONFIG.db_path)
-    conn.execute("DELETE FROM user_prefs")
-    conn.commit()
-    conn.close()
+    # Go through the capability rather than opening a raw sqlite3 handle:
+    # keeps the FK-enforcement PRAGMA on and lets us swap the backend later.
+    storage.clear_prefs()
     console.print("[green]cleared.[/green]")
-
 
 @cli.command()
 def init():
@@ -153,14 +143,15 @@ def init():
     storage.init()
     console.print(f"[green]initialised[/green] db={CONFIG.db_path}")
 
-
 @cli.command("bootstrap-indices")
 @click.argument("symbols", nargs=-1)
 def bootstrap_indices(symbols):
     """Pre-download ~20y daily data for major A-share indices."""
-    from .providers import AkshareMarketProvider
+    # The old code imported the (non-existent) AkshareMarketProvider; the
+    # working CN market provider is EastmoneyMarketProvider.
+    from .providers import EastmoneyMarketProvider
     from datetime import datetime
-    market = AkshareMarketProvider()
+    market = EastmoneyMarketProvider()
     catalog = market.list_available_indices()
     syms = list(symbols) or list(catalog.keys())
     end = datetime.now().strftime("%Y%m%d")
@@ -173,10 +164,8 @@ def bootstrap_indices(symbols):
         except Exception as e:
             console.print(f"[red]{s} FAILED[/red]: {e}")
 
-
 def main():
     cli(standalone_mode=True)
-
 
 if __name__ == "__main__":
     main()

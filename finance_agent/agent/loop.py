@@ -7,15 +7,21 @@ Architecture:
        │
   Provider Layer (concrete implementations, swappable)
        │
-  External APIs (eastmoney, cninfo, Tavily, Ark, DeepSeek, etc.)
+  External APIs (finnhub, eastmoney, cninfo, Tavily, Ark, DeepSeek, etc.)
 
 Two-model orchestration:
   planner_llm     — planning, reranking, verification, memory extraction
   synthesizer_llm — final answer synthesis (with optional 1 repair pass)
 
+Multi-market dispatch:
+  Each question triggers a market inference step (``_infer_market``); the
+  corresponding provider bundle is then obtained via
+  ``registry.for_market(market)``. This is the ONLY branch that knows about
+  markets — provider swapping (Finnhub → paid feed, external files → API)
+  happens in the registry, not here.
+
 Multi-turn support:
-  conversation_id — optional, enables multi-turn dialogue with context
-  Uses PydanticAI-inspired RunContext pattern for dependency injection
+  conversation_id — optional, enables multi-turn dialogue with context.
 """
 from __future__ import annotations
 import logging
@@ -25,12 +31,38 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..capabilities.base import Evidence
-from ..registry import ProviderRegistry, create_default_registry
+from ..registry import DEFAULT_MARKET, MarketProviders, ProviderRegistry, create_default_registry
 from ..retrieval.unified_retriever import UnifiedRetriever
 from . import planner, synthesizer, verifier, memory
-from .conversation_manager import ConversationManager, ConversationContext
+from .conversation_manager import ConversationContext, ConversationManager
 
 log = logging.getLogger(__name__)
+
+# Hard caps to keep cost and latency bounded regardless of what the planner
+# emits. LLMs occasionally hallucinate huge query fan-outs; without these
+# caps a single ask can burn dozens of paid API calls.
+_MAX_WEB_QUERIES_PER_PLAN = 3
+_MAX_EVIDENCE_TOTAL = 24
+_MAX_HISTORY_TURNS = 10
+
+# Words that look like US tickers (1–5 uppercase letters) but are actually
+# common finance/regulatory acronyms. Used to guard ``_infer_market`` from
+# flagging pure A-share questions as US just because they mention "SEC".
+_US_ACRONYM_BLOCKLIST = frozenset({
+    "SEC", "IPO", "ESG", "ETF", "GDP", "CPI", "PPI", "PMI",
+    "CEO", "CFO", "COO", "CTO", "CIO", "PE", "PB", "ROE", "ROA",
+    "EPS", "EBIT", "EBITDA", "USD", "CNY", "RMB", "HKD",
+    "SFC", "CSRC", "SSE", "SZSE", "HKEX", "NYSE", "NASDAQ",
+    "AI", "ML", "IT", "OK", "USA", "UK", "EU", "GAAP",
+    "A", "H", "K", "Q",  # 短通名,避免"A股"里的 A 被判美股
+})
+
+_CN_KEYWORD_HINTS = frozenset({
+    "A股", "沪市", "深市", "上证", "深证", "科创板", "创业板", "北交所",
+    "证监会", "巨潮", "东财", "东方财富", "公告", "年报", "半年报",
+    "比亚迪", "宁德时代", "中际旭创", "贵州茅台", "中国平安",
+    "招商银行", "五粮液", "美的集团", "格力电器", "海康威视",
+})
 
 @dataclass
 class AgentResult:
@@ -43,75 +75,48 @@ class AgentResult:
     prefs_updated: list[dict] = field(default_factory=list)
     conversation_id: str | None = None
 
-@dataclass
-class AgentContext:
-    """Context object inspired by PydanticAI's RunContext.
-    
-    Provides dependency injection for agent operations including:
-    - Conversation history management
-    - User preferences
-    - Tool registry access
-    """
-    registry: ProviderRegistry
-    conversation_manager: ConversationManager
-    conversation_id: str | None = None
-    max_history_turns: int = 10
-    
-    @property
-    def conversation_context(self) -> ConversationContext:
-        """Get or create conversation context."""
-        return ConversationContext(self.conversation_manager, self.conversation_id)
-    
-    def get_history(self) -> list[dict[str, str]]:
-        """Get conversation history for LLM context."""
-        conv_ctx = self.conversation_context
-        return conv_ctx.get_context_messages(max_turns=self.max_history_turns)
-    
-    def add_user_turn(self, content: str, metadata: dict[str, Any] | None = None):
-        """Record user turn in conversation."""
-        return self.conversation_context.add_user_turn(content, metadata)
-    
-    def add_assistant_turn(self, content: str, metadata: dict[str, Any] | None = None):
-        """Record assistant turn in conversation."""
-        return self.conversation_context.add_assistant_turn(content, metadata)
-
 class AgentLoop:
     """Finance Agent — depends only on Capability interfaces, not concrete providers.
-    
-    To swap providers (e.g., eastmoney → an internal proprietary feed, Tavily → DuckDuckGo):
-      1. Create new provider implementing the Capability interface
-      2. Pass custom ProviderRegistry to __init__
-      3. Agent code remains unchanged
-    
+
+    To swap providers (e.g., external files → an internal proprietary feed,
+    Tavily → DuckDuckGo):
+      1. Create new provider implementing the Capability interface.
+      2. Change registration in ``registry.py``.
+      3. Agent code remains unchanged.
+
     Multi-turn support:
-      - Pass conversation_id to ask() to continue an existing conversation
-      - Agent will load previous context and include it in planning/synthesis
+      - Pass ``conversation_id`` to :py:meth:`ask` to continue an existing
+        conversation. When ``None``, a fresh conversation is created and its
+        ID is returned in :class:`AgentResult`.
     """
-    
+
     def __init__(self, registry: ProviderRegistry | None = None):
         self.registry = registry or create_default_registry()
-        
+
         # Initialize storage
         self.registry.storage.init()
-        
-        # Aliases for cleaner code
+
+        # Cross-market capabilities (LLMs, web, storage)
         self._planner_llm = self.registry.planner_llm
         self._synth_llm = self.registry.synthesizer_llm
-        self._market = self.registry.market_data
-        self._financials = self.registry.financials
-        self._filings = self.registry.filings
         self._web = self.registry.web_search
         self._storage = self.registry.storage
-        
-        # Initialize unified retriever for RAG
+
+        # Unified retriever + conversation manager
         self._retriever = UnifiedRetriever(self.registry)
-        
-        # Initialize conversation manager for multi-turn support
         self._conversation_manager = ConversationManager(self._storage)
 
     # ---------- tool dispatch ----------
-    def _run_tools(self, tool_calls: list[dict]) -> list[Evidence]:
-        """Execute tool calls and collect evidence. Uses Capability interfaces."""
+    def _run_tools(self, tool_calls: list[dict], providers: MarketProviders) -> list[Evidence]:
+        """Execute planner-emitted tool calls against a market-specific bundle.
+
+        Providers are passed in explicitly (rather than looked up on ``self``)
+        so the same helper works for either market.
+        """
+        market_data = providers.market_data
+        financials = providers.financials
+        filings = providers.filings
+
         evs: list[Evidence] = []
         for t in tool_calls:
             # Accept either {"tool": ...} or {"name": ...} — different LLMs
@@ -120,37 +125,37 @@ class AgentLoop:
             args = t.get("args") or t.get("arguments") or {}
             try:
                 if name == "market.index":
-                    symbols = args.get("symbols") or list(self._market.list_available_indices().keys())[:3]
+                    symbols = args.get("symbols") or list(market_data.list_available_indices().keys())[:3]
                     years = int(args.get("years", 20))
                     for sym in symbols:
                         try:
-                            ev = self._market.summarize_index(sym, lookback_years=years)
+                            ev = market_data.summarize_index(sym, lookback_years=years)
                             evs.append(self._storage.register_evidence(ev))
                         except Exception as e:
                             log.warning("summarize_index(%s) failed: %s", sym, e)
-                            
+
                 elif name == "market.stock":
                     sym = str(args.get("symbol", "")).strip()
-                    if sym:
-                        ev = self._market.summarize_stock(sym, lookback_days=int(args.get("lookback_days", 365)))
+                    if _is_safe_symbol(sym):
+                        ev = market_data.summarize_stock(sym, lookback_days=int(args.get("lookback_days", 365)))
                         evs.append(self._storage.register_evidence(ev))
-                        
+
                 elif name == "financials":
                     sym = str(args.get("symbol", "")).strip()
                     kinds = args.get("kinds") or ["income", "balance", "cashflow"]
-                    if sym:
-                        for ev in self._financials.collect_all(sym, statement_types=kinds,
-                                                               periods=int(args.get("periods", 3))):
+                    if _is_safe_symbol(sym):
+                        for ev in financials.collect_all(sym, statement_types=kinds,
+                                                        periods=int(args.get("periods", 3))):
                             evs.append(self._storage.register_evidence(ev))
-                            
+
                 elif name == "filings":
                     sym = str(args.get("symbol", "")).strip()
-                    if sym:
-                        for ev in self._filings.collect_filings(sym, years_back=int(args.get("years_back", 2))):
+                    if _is_safe_symbol(sym):
+                        for ev in filings.collect_filings(sym, years_back=int(args.get("years_back", 2))):
                             evs.append(self._storage.register_evidence(ev))
-                            
+
                 elif name == "web":
-                    queries = args.get("queries") or []
+                    queries = list(args.get("queries") or [])[:_MAX_WEB_QUERIES_PER_PLAN]
                     for q in queries:
                         for ev in self._web.search_and_extract(
                             q, max_results=6, final_top=5, reranker=self._planner_llm
@@ -162,56 +167,60 @@ class AgentLoop:
                 log.exception("tool %s failed: %s", name, e)
         return evs
 
-    def _is_ashare_symbol(self, symbol: str) -> bool:
+    # ---------- market inference ----------
+    @staticmethod
+    def _is_ashare_symbol(symbol: str) -> bool:
         """Check if symbol is A-share (6-digit numeric)."""
         return bool(re.match(r"^\d{6}$", symbol))
 
-    def _is_us_symbol(self, symbol: str) -> bool:
-        """Check if symbol is US stock (alphabetic)."""
-        return bool(re.match(r"^[A-Z]{1,5}$", symbol)) and not self._is_ashare_symbol(symbol)
+    @classmethod
+    def _is_us_symbol(cls, symbol: str) -> bool:
+        """Check if symbol is US stock (1–5 uppercase letters, minus acronyms)."""
+        if not re.match(r"^[A-Z]{1,5}$", symbol):
+            return False
+        return symbol not in _US_ACRONYM_BLOCKLIST
 
     def _infer_market(self, tool_calls: list[dict], question: str = "") -> str:
-        """Infer market from tool calls and question.
-        
-        Returns:
-            "cn" for A-share, "us" for US stocks, "unknown" if cannot determine.
+        """Infer market from tool calls and question text.
+
+        Returns ``"us"`` or ``"cn"``. Uses :data:`DEFAULT_MARKET` when signals
+        conflict or nothing matches — the loop always dispatches to a real
+        bundle so callers never see an "unknown" market.
         """
-        # First try to infer from tool calls (symbol)
+        # First try to infer from tool calls (symbol).
         for t in tool_calls:
             args = t.get("args") or t.get("arguments") or {}
             sym = str(args.get("symbol", "")).strip()
             if sym:
                 if self._is_ashare_symbol(sym):
                     return "cn"
-                elif self._is_us_symbol(sym):
+                if self._is_us_symbol(sym):
                     return "us"
-        
-        # Fallback: infer from question text
+
         if question:
-            # Check for A-share patterns
-            # 6-digit numeric codes (A-share)
-            if re.search(r'\b\d{6}\b', question):
-                return "cn"
-            
-            # Chinese stock names (common A-share companies)
-            cn_names = ['比亚迪', '宁德时代', '中际旭创', '贵州茅台', '中国平安', 
-                       '招商银行', '五粮液', '美的集团', '格力电器', '海康威视']
-            for name in cn_names:
-                if name in question:
+            # Explicit CN keywords take priority — a question like
+            # "分析比亚迪的 ESG 表现" mustn't be mistaken for a US ticker.
+            for kw in _CN_KEYWORD_HINTS:
+                if kw in question:
                     return "cn"
-            
-            # US stock patterns (alphabetic, 1-5 chars, uppercase)
-            if re.search(r'\b[A-Z]{1,5}\b', question):
-                return "us"
-        
-        return "unknown"
+
+            # 6-digit code anywhere → A-share.
+            if re.search(r"\b\d{6}\b", question):
+                return "cn"
+
+            # Real-looking US ticker (excluding common acronyms).
+            for m in re.finditer(r"\b([A-Z]{1,5})\b", question):
+                if self._is_us_symbol(m.group(1)):
+                    return "us"
+
+        return DEFAULT_MARKET
 
     def _infer_external_kinds(self, tool_calls: list[dict]) -> list[str] | None:
         """Infer which external data sources to search based on planned tools.
-        
-        Returns None to search all sources, or a list of specific kinds.
+
+        Returns ``None`` to search all sources, or a list of specific kinds.
         """
-        kinds = set()
+        kinds: set[str] = set()
         for t in tool_calls:
             name = t.get("tool") or t.get("name") or ""
             if name in ("market.index", "market.stock"):
@@ -220,8 +229,7 @@ class AgentLoop:
                 kinds.add("financials")
             elif name == "filings":
                 kinds.add("filings")
-        
-        # If no specific tools, search all external data
+
         if not kinds:
             return None
         return list(kinds)
@@ -233,54 +241,41 @@ class AgentLoop:
             "model_planner": self._planner_llm.name,
             "model_synthesizer": self._synth_llm.name,
         }
-        
-        # Create AgentContext for dependency injection pattern
-        agent_ctx = AgentContext(
-            registry=self.registry,
-            conversation_manager=self._conversation_manager,
-            conversation_id=conversation_id,
-            max_history_turns=10,
-        )
-        
-        # Add user turn to conversation history
-        agent_ctx.add_user_turn(question)
-        
-        # Get conversation history for context (PydanticAI-inspired)
-        history = agent_ctx.get_history()
+
+        # Conversation state — one context per ask() call.
+        conv_ctx = ConversationContext(self._conversation_manager, conversation_id)
+        conv_ctx.add_user_turn(question)
+        history = conv_ctx.get_context_messages(max_turns=_MAX_HISTORY_TURNS)
+        trace["conversation_id"] = conv_ctx.conversation_id
         trace["conversation_history_length"] = len(history)
-        trace["conversation_id"] = agent_ctx.conversation_context.conversation_id
 
         prefs = self._storage.load_prefs()
         trace["prefs_in"] = prefs
 
-        # 1. Plan (via Capability) - with conversation context
+        # 1. Plan (with conversation history for context).
         plan_obj = planner.plan(self._planner_llm, question, prefs, history=history)
         trace["plan"] = plan_obj
 
-        # 2. Tools (via Capabilities) + External Data RAG
-        # Determine market from tool calls and question
+        # 2. Market dispatch — pick the right provider bundle for this turn.
         market = self._infer_market(plan_obj.get("tools", []), question=question)
+        providers = self.registry.for_market(market)
         trace["detected_market"] = market
-        
-        # For A-share: skip API tools, use external data only
-        # For US: use API tools as before
+
+        # 2a. For US: hit real APIs (Finnhub).
+        #     For CN: skip API tools entirely and rely on RAG over local files.
         if market == "cn":
             log.info("A-share detected, using external data only (no API calls)")
-            evs = []
+            evs: list[Evidence] = []
         else:
-            evs = self._run_tools(plan_obj.get("tools", []))
-        
+            evs = self._run_tools(plan_obj.get("tools", []), providers)
+
         trace["evidence_count_from_tools"] = len(evs)
-        
-        # 2.5 Retrieve from external data via RAG
-        # For A-share: always search external data
-        # For US: search external data as supplement (optional, can be disabled)
+
+        # 2b. Retrieve from external data via RAG.
+        #     CN → primary evidence source (local files).
+        #     US → skip (API tools already provided authoritative data).
         try:
-            # Determine which external data sources to search based on tools used
             external_kinds = self._infer_external_kinds(plan_obj.get("tools", []))
-            
-            # For A-share: always use external data
-            # For US: skip external data RAG (already got API data from tools)
             if market == "cn":
                 rag_evs = self._retriever.retrieve(
                     question,
@@ -294,14 +289,13 @@ class AgentLoop:
                 trace["evidence_count_from_rag"] = len(rag_evs)
                 log.info("RAG retrieved %d evidence from external data", len(rag_evs))
             else:
-                # US stocks: skip external data RAG to avoid duplication with API data
                 trace["evidence_count_from_rag"] = 0
                 log.info("US stock detected, skipping external data RAG (using API data)")
         except Exception as e:
             log.warning("External data RAG failed: %s", e)
             trace["evidence_count_from_rag"] = 0
-        
-        # If still no evidence, fallback to web search
+
+        # 2c. Fallback: no evidence at all → web search.
         if not evs:
             log.info("no evidence from tools or RAG, falling back to web")
             try:
@@ -314,21 +308,20 @@ class AgentLoop:
                 # the synthesizer can still emit a "no evidence" answer.
                 log.warning("web fallback failed: %s", e)
 
-        # Cap evidence pool for cost control
-        MAX_EV = 24
-        if len(evs) > MAX_EV:
-            evs = evs[:MAX_EV]
+        # Cap evidence pool for cost control (order preserved).
+        if len(evs) > _MAX_EVIDENCE_TOTAL:
+            evs = evs[:_MAX_EVIDENCE_TOTAL]
 
         trace["evidence_count_total"] = len(evs)
 
         raw_sections = plan_obj.get("answer_sections") or ["Summary", "Key Numbers", "Risks", "Evidence"]
         sections: list[str] = [s for s in raw_sections if isinstance(s, str)]
 
-        # 3. Synthesize (via Capability) - with conversation context
+        # 3. Synthesize.
         draft = synthesizer.synthesize(self._synth_llm, question, prefs, evs, sections, history=history)
         trace["draft_len"] = len(draft)
 
-        # 4. Verify (via Capability) + up to 1 repair
+        # 4. Verify + up to 1 repair.
         vres = verifier.verify(self._planner_llm, draft, evs)
         trace["verify_1"] = vres.raw
         answer = draft
@@ -344,7 +337,7 @@ class AgentLoop:
                 answer += ("\n\n> ⚠️ **Verifier notice**: 部分论断可能仍存在证据不足,"
                            "请以下方 Evidence 段落为准。\n")
 
-        # 5. Persist answer + citations (via Capability)
+        # 5. Persist answer + citations.
         used = sorted(set(int(m) for m in _extract_used_labels(answer)))
         citations = []
         for label in used:
@@ -356,12 +349,14 @@ class AgentLoop:
         trace["answer_id"] = aid
         trace["elapsed_s"] = round(time.time() - t0, 2)
 
-        # 6. Memory (via Capability)
-        prefs_updated = memory.extract_and_update(self._planner_llm, self._storage, question, answer, answer_id=aid)
+        # 6. Memory.
+        prefs_updated = memory.extract_and_update(
+            self._planner_llm, self._storage, question, answer, answer_id=aid
+        )
         trace["prefs_updated"] = prefs_updated
-        
-        # 7. Add assistant turn to conversation history
-        agent_ctx.add_assistant_turn(answer, metadata={"answer_id": aid, "evidence_count": len(evs)})
+
+        # 7. Record assistant turn in conversation history.
+        conv_ctx.add_assistant_turn(answer, metadata={"answer_id": aid, "evidence_count": len(evs)})
 
         return AgentResult(
             question=question,
@@ -371,8 +366,19 @@ class AgentLoop:
             trace=trace,
             answer_id=aid,
             prefs_updated=prefs_updated,
-            conversation_id=agent_ctx.conversation_context.conversation_id,
+            conversation_id=conv_ctx.conversation_id,
         )
+
+# --------------------------------------------------------------------- helpers
+
+# Symbol whitelist — planner output is LLM-generated and eventually gets
+# forwarded to outbound HTTP calls; guard against weird characters that could
+# break URLs or trigger downstream 500s. Alphanumerics plus a couple of
+# separators cover both US tickers (AAPL) and A-share codes (600519).
+_SYMBOL_RE = re.compile(r"^[A-Za-z0-9._-]{1,10}$")
+
+def _is_safe_symbol(sym: str) -> bool:
+    return bool(sym) and bool(_SYMBOL_RE.match(sym))
 
 def _extract_used_labels(text: str) -> list[int]:
     return [int(m.group(1)) for m in re.finditer(r"\[S(\d+)\]", text)]

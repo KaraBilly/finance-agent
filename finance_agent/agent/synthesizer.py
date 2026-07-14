@@ -10,7 +10,9 @@ from ..capabilities.base import Evidence
 
 log = logging.getLogger(__name__)
 
-SYSTEM = """You are a financial analyst assistant for A-share investing.
+SYSTEM = """You are a financial analyst assistant covering both US-listed equities
+and China A-share equities. Adapt terminology and reporting norms to the market
+implied by the question (e.g., 10-K/10-Q vs. 年报/半年报, USD vs. CNY).
 You will be given:
   1) The user question.
   2) The user's persistent preferences (topics they care about).
@@ -18,16 +20,16 @@ You will be given:
   4) The desired output sections.
 
 Rules — absolutely mandatory:
-- Write in the language of the user question (default Chinese).
+- Write in the language of the user question (Chinese if the question is Chinese,
+  English if the question is English).
 - Use Markdown. Prefer tables for numeric comparisons.
 - EVERY factual statement, number, or quoted phrase MUST be followed by one or more
   citations like [S3] or [S1][S4]. Multiple citations are fine.
 - Do NOT use knowledge outside the evidence. If evidence is insufficient for a section,
-  write "证据不足" for that section and explain what's missing.
+  write "证据不足" (or "Insufficient evidence") for that section and explain what's missing.
 - Include a final `## Evidence` section that lists each cited [S#] with title and URL.
 - Keep it structured, terse, and skimmable.
 """
-
 
 def _format_evidence(evs: list[Evidence]) -> str:
     lines = []
@@ -39,7 +41,6 @@ def _format_evidence(evs: list[Evidence]) -> str:
             head += f"  <{e.url}>"
         lines.append(head + "\n" + e.text.strip())
     return "\n\n---\n\n".join(lines)
-
 
 def synthesize(model: LLMCapability, question: str, prefs: list[dict],
                evidences: list[Evidence], sections: list[str],

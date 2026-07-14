@@ -12,11 +12,15 @@ from ..config import CONFIG
 
 log = logging.getLogger(__name__)
 
-
 class OpenAICompatibleLLM(LLMCapability):
     """Base provider for any OpenAI-compatible API."""
 
     default_temperature: float = 0.3
+    # Default output cap. Callers can override per-call via ``max_tokens``.
+    # Without this, a runaway generation on an expensive model could rack up
+    # a large bill silently; 4096 is enough for the synthesizer's Markdown
+    # answer, and the verifier / planner JSON responses are much smaller.
+    default_max_tokens: int = 4096
 
     def __init__(self, *, api_key: str, base_url: str, model: str, name: str = "llm"):
         if not api_key:
@@ -42,8 +46,12 @@ class OpenAICompatibleLLM(LLMCapability):
             "messages": payload,
             "temperature": temperature if temperature is not None else self.default_temperature,
         }
-        if max_tokens is not None:
-            kwargs["max_tokens"] = max_tokens
+        # Apply an output cap: caller-supplied value wins; otherwise the
+        # provider default. Prevents pathological generations that blow past
+        # a reasonable answer length.
+        effective_max_tokens = max_tokens if max_tokens is not None else self.default_max_tokens
+        if effective_max_tokens is not None:
+            kwargs["max_tokens"] = effective_max_tokens
         if json_mode:
             # 火山方舟等部分模型不支持 json_object，改用 prompt 方式
             base_url = str(self.client.base_url)
@@ -73,7 +81,6 @@ class OpenAICompatibleLLM(LLMCapability):
                 return json.loads(raw[start : end + 1])
             raise
 
-
 class DoubaoProvider(OpenAICompatibleLLM):
     """doubao-seed-evolving via 火山方舟 Ark."""
 
@@ -85,7 +92,6 @@ class DoubaoProvider(OpenAICompatibleLLM):
             model=model or CONFIG.doubao_model,
             name="doubao",
         )
-
 
 class DeepSeekProvider(OpenAICompatibleLLM):
     """DeepSeek via OpenAI-compatible endpoint."""

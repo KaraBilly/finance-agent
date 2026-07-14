@@ -1,10 +1,13 @@
 """Tavily + Trafilatura web search provider."""
 from __future__ import annotations
 import hashlib
+import ipaddress
 import logging
 import re
+import socket
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 import trafilatura
@@ -38,6 +41,52 @@ _DEFAULT_HEADERS = {
     "Upgrade-Insecure-Requests": "1",
 }
 
+def _is_safe_url(url: str) -> bool:
+    """SSRF guard: only allow http(s) URLs whose host resolves to a public IP.
+
+    Tavily results, and any LLM-emitted URLs, ultimately get fetched from
+    this process. Without a guard, a malicious page could point us at
+    ``http://169.254.169.254/`` (cloud metadata) or ``http://localhost:8080``
+    (internal services). We defensively reject:
+
+      - non-http(s) schemes (file://, gopher://, ftp://, ...);
+      - hosts that resolve to loopback / private / link-local / reserved IPs.
+
+    This isn't perfect (a hostile server can re-resolve between our check
+    and requests', a classic TOCTOU) but it blocks the trivial attack.
+    """
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    if parsed.scheme not in ("http", "https"):
+        return False
+    host = parsed.hostname
+    if not host:
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+        candidates = [ip]
+    except ValueError:
+        try:
+            infos = socket.getaddrinfo(host, None)
+        except OSError as exc:
+            log.debug("DNS lookup failed for %s: %s", host, exc)
+            return False
+        candidates = []
+        for info in infos:
+            try:
+                candidates.append(ipaddress.ip_address(info[4][0]))
+            except (ValueError, IndexError):
+                continue
+        if not candidates:
+            return False
+    for addr in candidates:
+        if (addr.is_private or addr.is_loopback or addr.is_link_local
+                or addr.is_reserved or addr.is_multicast or addr.is_unspecified):
+            log.warning("Refusing SSRF-risky URL %s (resolves to %s)", url, addr)
+            return False
+    return True
 
 def _fetch_with_retry(
     url: str,
@@ -46,6 +95,8 @@ def _fetch_with_retry(
     timeout: int = 15,
 ) -> str | None:
     """Fetch URL with retries and exponential backoff."""
+    if not _is_safe_url(url):
+        return None
     for attempt in range(1, max_retries + 1):
         try:
             resp = requests.get(url, headers=_DEFAULT_HEADERS, timeout=timeout)
@@ -72,7 +123,6 @@ def _fetch_with_retry(
     log.warning("All retries failed for %s, skipping", url)
     return None
 
-
 class TavilyWebProvider(WebSearchCapability):
     """Web search via Tavily, extraction via Trafilatura."""
 
@@ -91,15 +141,22 @@ class TavilyWebProvider(WebSearchCapability):
         return resp.get("results", [])
 
     def extract_content(self, url: str, fallback_snippet: str = "") -> str:
+        # SSRF guard applied here as well so trafilatura.fetch_url cannot be
+        # used to reach internal hosts (it does its own request).
+        if not _is_safe_url(url):
+            log.warning("skipping unsafe URL: %s", url)
+            return fallback_snippet or ""
         cache = self._cache_path(url)
         if cache.exists():
             return cache.read_text(encoding="utf-8", errors="ignore")
         
         html = None
         
-        # Try trafilatura first (handles JS-heavy sites)
+        # Try trafilatura first (handles JS-heavy sites). We drop ``no_ssl``:
+        # accepting untrusted TLS opens the door to MITM'd tampering of the
+        # evidence we feed into the model.
         try:
-            html = trafilatura.fetch_url(url, no_ssl=True)
+            html = trafilatura.fetch_url(url)
         except Exception as e:
             log.debug("trafilatura fetch_url failed for %s: %s", url, e)
         

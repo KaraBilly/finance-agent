@@ -34,7 +34,6 @@ they don't care. If nothing to record, return prefs=[].
 
 _EMA_ALPHA = 0.4
 
-
 def extract_and_update(model: LLMCapability, storage: StorageCapability,
                        question: str, answer: str,
                        answer_id: int | None = None) -> list[dict]:
@@ -54,14 +53,19 @@ def extract_and_update(model: LLMCapability, storage: StorageCapability,
         delta = float(p.get("delta", 0))
         if not topic or delta == 0:
             continue
-        # merge with existing weight via EMA
+        # Merge with existing weight via EMA against a clipped target.
+        # Original code was ``new = (1-α)·current + α·(current+delta)`` which
+        # algebraically simplifies to ``current + α·delta`` — a plain
+        # linear step, not an EMA. Correct EMA is toward a target value; we
+        # clip the target into [0, 1] first so a single large delta cannot
+        # drag ``new_weight`` outside the valid range once smoothed.
         current = _current_weight(storage, topic)
-        new_weight = max(0.0, min(1.0, (1 - _EMA_ALPHA) * current + _EMA_ALPHA * (current + delta)))
+        target = max(0.0, min(1.0, current + delta))
+        new_weight = (1 - _EMA_ALPHA) * current + _EMA_ALPHA * target
         storage.upsert_pref(topic, new_weight, note=str(p.get("note", ""))[:200],
                             evidence_answer_id=answer_id)
         updated.append({"topic": topic, "weight": new_weight, "delta": delta})
     return updated
-
 
 def _current_weight(storage: StorageCapability, topic: str) -> float:
     for p in storage.load_prefs(limit=1000):

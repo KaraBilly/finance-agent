@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, Any, Iterable
 if TYPE_CHECKING:
     from .base import Evidence
 
-
 class StorageCapability(ABC):
     """Abstract interface for evidence and answer persistence."""
 
@@ -74,6 +73,16 @@ class StorageCapability(ABC):
         evidence_answer_id: int | None = None,
     ) -> None:
         """Insert or update a user preference."""
+        ...
+
+    @abstractmethod
+    def clear_prefs(self) -> None:
+        """Delete all stored user preferences.
+
+        Used by the CLI ``clear-prefs`` command. Kept on the capability
+        interface (rather than reaching into the SQLite connection directly)
+        so alternative backends stay swappable.
+        """
         ...
 
     def register_evidence(self, ev: "Evidence", raw_path: str | None = None) -> "Evidence":

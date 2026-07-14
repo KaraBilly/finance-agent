@@ -59,7 +59,6 @@ CREATE TABLE IF NOT EXISTS user_prefs (
 );
 """
 
-
 class SQLiteStorageProvider(StorageCapability):
     """SQLite-based persistence for evidence, answers, and user preferences."""
 
@@ -177,3 +176,14 @@ class SQLiteStorageProvider(StorageCapability):
                 "   last_seen=excluded.last_seen, evidence_answer_id=excluded.evidence_answer_id",
                 (topic, weight, note, time.time(), evidence_answer_id),
             )
+
+    def clear_prefs(self) -> None:
+        """Delete every row in ``user_prefs``.
+
+        Called by the CLI ``clear-prefs`` command. Exposed via the capability
+        interface so callers don't have to open their own ``sqlite3`` handle
+        against ``CONFIG.db_path`` (which was the previous approach and
+        bypassed the FK-enforcement PRAGMA plus the swappable storage layer).
+        """
+        with self._connect() as c:
+            c.execute("DELETE FROM user_prefs")
